@@ -1,3 +1,5 @@
+// for nicer doc links
+#[allow(unused_imports)]
 use crate::ClamdClient;
 use std::num::TryFromIntError;
 

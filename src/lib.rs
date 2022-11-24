@@ -417,7 +417,7 @@ impl ClamdClient {
         sock.send(ClamdRequestMessage::EndStream).await?;
         if let Some(s) = sock.next().await.transpose()? {
             let msg = s
-                .split_once(":")
+                .split_once(':')
                 .map(|(_, msg)| msg.trim())
                 .ok_or_else(|| ClamdError::IncompleteResponse(s.clone()))?;
 
