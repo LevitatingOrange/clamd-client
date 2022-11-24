@@ -1,8 +1,12 @@
 //! # clamd-client
 //!
 //! `clamd-client`: Rust async tokio client for clamd. Works with a
-//! tcp socket or with the unix socket. At the moment it will open a
-//! new socket for each command. Work in progress.
+//! tcp socket or with a unix socket. At the moment it will open a
+//! new socket for each command.
+//! While this uses some tokio library structs, in principle
+//! it *should* also work with other async runtimes as the
+//! this library does not depend on the tokio runtime itself. I have
+//! still to test this though.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::SinkExt;
@@ -22,11 +26,12 @@ use tracing::trace;
 
 use crate::error::Result;
 
-pub mod error;
+mod error;
 
-pub use error::Error;
+pub use error::ClamdError;
 
-const DEFAULT_CHUNK_SIZE: usize = 8192;
+/// Default chunk size used by [`ClamdClient`] while streaming bytes to `clamd`.
+pub const DEFAULT_CHUNK_SIZE: usize = 8192;
 
 enum ClamdRequestMessage {
     Ping,
@@ -50,7 +55,7 @@ impl ClamdZeroDelimitedCodec {
 }
 
 impl Encoder<ClamdRequestMessage> for ClamdZeroDelimitedCodec {
-    type Error = Error;
+    type Error = ClamdError;
 
     fn encode(&mut self, item: ClamdRequestMessage, dst: &mut BytesMut) -> Result<()> {
         match item {
@@ -92,7 +97,7 @@ impl Encoder<ClamdRequestMessage> for ClamdZeroDelimitedCodec {
             }
             ClamdRequestMessage::StreamChunk(bytes) => {
                 dst.reserve(4);
-                dst.put_u32(bytes.len().try_into().map_err(Error::ChunkSizeError)?);
+                dst.put_u32(bytes.len().try_into().map_err(ClamdError::ChunkSizeError)?);
                 dst.extend_from_slice(&bytes);
                 Ok(())
             }
@@ -109,7 +114,7 @@ impl Encoder<ClamdRequestMessage> for ClamdZeroDelimitedCodec {
 impl Decoder for ClamdZeroDelimitedCodec {
     type Item = String;
 
-    type Error = Error;
+    type Error = ClamdError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
         if let Some(rel_split_pos) = src[self.next_index..].iter().position(|&x| x == 0u8) {
@@ -117,7 +122,7 @@ impl Decoder for ClamdZeroDelimitedCodec {
             let chunk = src.split_to(split_pos).freeze();
             src.advance(1);
             self.next_index = 0;
-            let s = String::from_utf8(chunk.into()).map_err(Error::DecodingUtf8Error)?;
+            let s = String::from_utf8(chunk.into()).map_err(ClamdError::DecodingUtf8Error)?;
             Ok(Some(s))
         } else {
             self.next_index = src.len();
@@ -195,6 +200,18 @@ enum SocketTypeBuilder<'a> {
     Unix(&'a Path),
 }
 
+/// Builder for [`ClamdClient`].
+/// # Example
+/// ```rust
+/// # use std::net::SocketAddr;
+/// # use clamd_client::ClamdClientBuilder;
+/// # use eyre::Result;
+/// # async fn doc() -> eyre::Result<()> {
+/// let address = "127.0.0.1:3310".parse::<SocketAddr>()?;
+/// let mut clamd_client = ClamdClientBuilder::tcp_socket(&address).chunk_size(4096).build();
+/// # Ok(())
+/// # }
+/// ```
 pub struct ClamdClientBuilder<'a> {
     socket_type: SocketTypeBuilder<'a>,
     connection_type: ConnectionType,
@@ -202,8 +219,7 @@ pub struct ClamdClientBuilder<'a> {
 }
 
 impl<'a> ClamdClientBuilder<'a> {
-    /// Build a `ClamdClient` from the path to the unix socket of `clamd`. Defaults to a chunk size
-    /// for file streaming of [`DEFAULT_CHUNK_SIZE`].
+    /// Build a [`ClamdClient`] from the path to the unix socket of `clamd`.
     pub fn unix_socket<P: AsRef<Path> + ?Sized>(path: &'a P) -> Self {
         Self {
             socket_type: SocketTypeBuilder::Unix(path.as_ref()),
@@ -211,8 +227,7 @@ impl<'a> ClamdClientBuilder<'a> {
             chunk_size: DEFAULT_CHUNK_SIZE,
         }
     }
-    /// Build a `ClamdClient` from the socket address to the tcp socket of `clamd`. Defaults to a chunk size
-    /// for file streaming of [`DEFAULT_CHUNK_SIZE`].
+    /// Build a [`ClamdClient`] from the socket address to the tcp socket of `clamd`.
     pub fn tcp_socket(addr: &'a SocketAddr) -> Self {
         Self {
             socket_type: SocketTypeBuilder::Tcp(addr),
@@ -221,13 +236,13 @@ impl<'a> ClamdClientBuilder<'a> {
         }
     }
 
-    /// Set the chunk size for file streaming.
+    /// Set the chunk size for file streaming. Default is [`DEFAULT_CHUNK_SIZE`].
     pub fn chunk_size(&'a mut self, chunk_size: usize) -> &'a mut Self {
         self.chunk_size = chunk_size;
         self
     }
 
-    /// Create `ClamdClient` with provided configuration.
+    /// Create [`ClamdClient`] with provided configuration.
     pub fn build(&'a self) -> ClamdClient {
         ClamdClient {
             socket_type: match self.socket_type {
@@ -243,6 +258,9 @@ impl<'a> ClamdClientBuilder<'a> {
 /// Asynchronous, tokio based client for clamd. Use [`ClamdClientBuilder`] to build.
 /// At the moment, this will always open a new TCP connection for each command executed.
 /// There are plans to also include an option to reuse / keep alive connections but that is a TODO.
+///
+/// For more information about the various commands please also consult the man pages for clamd (`man clamd`).
+///
 /// # Example
 /// ```rust
 /// # use std::net::SocketAddr;
@@ -271,7 +289,7 @@ impl ClamdClient {
                     SocketWrapper::Tcp(
                         TcpStream::connect(address)
                             .await
-                            .map_err(Error::ConnectError)?,
+                            .map_err(ClamdError::ConnectError)?,
                     ),
                     codec,
                 )),
@@ -279,7 +297,7 @@ impl ClamdClient {
                     SocketWrapper::Unix(
                         UnixStream::connect(path)
                             .await
-                            .map_err(Error::ConnectError)?,
+                            .map_err(ClamdError::ConnectError)?,
                     ),
                     codec,
                 )),
@@ -288,7 +306,7 @@ impl ClamdClient {
         }
     }
 
-    /// Ping clamd. If it responds normally (with `PONG`) this function returns `Ok(())` otherwise,
+    /// Ping clamd. If it responds normally (with `PONG`) this function returns `Ok(())`, otherwise
     /// returns with error.
     pub async fn ping(&mut self) -> Result<()> {
         let mut sock = self.connect().await?;
@@ -299,14 +317,14 @@ impl ClamdClient {
                 trace!("Received pong from clamd");
                 Ok(())
             } else {
-                Err(Error::InvalidResponse(s))
+                Err(ClamdError::InvalidResponse(s))
             }
         } else {
-            Err(Error::NoResponse)
+            Err(ClamdError::NoResponse)
         }
     }
 
-    /// Get `clamd` version
+    /// Get `clamd` version string.
     pub async fn version(&mut self) -> Result<String> {
         let mut sock = self.connect().await?;
         sock.send(ClamdRequestMessage::Version).await?;
@@ -316,11 +334,11 @@ impl ClamdClient {
             trace!("Received version from clamd");
             Ok(s)
         } else {
-            Err(Error::NoResponse)
+            Err(ClamdError::NoResponse)
         }
     }
 
-    /// Reload `clamd`
+    /// Reload `clamd`.
     pub async fn reload(&mut self) -> Result<()> {
         let mut sock = self.connect().await?;
         sock.send(ClamdRequestMessage::Reload).await?;
@@ -335,10 +353,10 @@ impl ClamdClient {
                 trace!("Clamd finished reload");
                 Ok(())
             } else {
-                Err(Error::InvalidResponse(s))
+                Err(ClamdError::InvalidResponse(s))
             }
         } else {
-            Err(Error::NoResponse)
+            Err(ClamdError::NoResponse)
         }
     }
 
@@ -353,10 +371,10 @@ impl ClamdClient {
                 trace!("Got stats from clamd");
                 Ok(s)
             } else {
-                Err(Error::IncompleteResponse(s))
+                Err(ClamdError::IncompleteResponse(s))
             }
         } else {
-            Err(Error::NoResponse)
+            Err(ClamdError::NoResponse)
         }
     }
 
@@ -371,9 +389,15 @@ impl ClamdClient {
     /// Upload bytes to check it for viruses. This will chunk the
     /// reader with a chunk size defined in the
     /// `ClamdClientBuilder`. Only if clamd resonds with `stream: OK`
-    /// (and clamd found the bytes to not include virus signatures)
-    /// this function will return `Ok(())`. In all other cases returns
-    /// an error.
+    /// (and thus clamd found the bytes to not include virus
+    /// signatures) this function will return `Ok(())`. In all other
+    /// cases returns an error.
+    ///
+    /// # Errors
+    /// If the scan was sucessful
+    /// but seems to have found a virus signature this returns
+    /// [`ClamdError::ScanError`] with the scan result. See [`ClamdError`] for more
+    /// information.
     pub async fn scan_reader<R: AsyncRead + AsyncReadExt + Unpin>(
         &mut self,
         mut to_scan: R,
@@ -392,17 +416,22 @@ impl ClamdClient {
         trace!("Hit EOF, closing stream to clamd");
         sock.send(ClamdRequestMessage::EndStream).await?;
         if let Some(s) = sock.next().await.transpose()? {
-            if s == "stream: OK" {
+            let msg = s
+                .split_once(":")
+                .map(|(_, msg)| msg.trim())
+                .ok_or_else(|| ClamdError::IncompleteResponse(s.clone()))?;
+
+            if msg == "OK" {
                 Ok(())
             } else {
-                Err(Error::ScanError(s))
+                Err(ClamdError::ScanError(msg.to_owned()))
             }
         } else {
-            Err(Error::NoResponse)
+            Err(ClamdError::NoResponse)
         }
     }
 
-    /// Convienence method to scan a bytes slice. See [`scan_reader`]
+    /// Convienence method to scan a bytes slice. Wraps [`ClamdClient::scan_reader`], so see there
     /// for more information.
     pub async fn scan_bytes(&mut self, to_scan: &[u8]) -> Result<()> {
         let cursor = Cursor::new(to_scan);
@@ -410,8 +439,8 @@ impl ClamdClient {
     }
 
     /// Convienence method to directly scan a file under the given
-    /// path. This will read the file and stream it to clamd. See
-    /// [`scan_reader`] for more information.
+    /// path. This will read the file and stream it to clamd. Wraps
+    /// [`ClamdClient::scan_reader`], so see there for more information.
     pub async fn scan_file(&mut self, path_to_scan: impl AsRef<Path>) -> Result<()> {
         let reader = File::open(path_to_scan).await?;
         self.scan_reader(reader).await
@@ -464,8 +493,8 @@ mod tests {
         let address = TCP_ADDRESS.parse::<SocketAddr>()?;
         let mut clamd_client = ClamdClientBuilder::tcp_socket(&address).build();
         let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
-        if let Error::ScanError(s) = err {
-            assert_eq!(s, "stream: Win.Test.EICAR_HDB-1 FOUND");
+        if let ClamdError::ScanError(s) = err {
+            assert_eq!(s, "Win.Test.EICAR_HDB-1 FOUND");
         } else {
             panic!("Scan error expected");
         }
@@ -515,8 +544,8 @@ mod tests {
 
         let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
         let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
-        if let Error::ScanError(s) = err {
-            assert_eq!(s, "stream: Win.Test.EICAR_HDB-1 FOUND");
+        if let ClamdError::ScanError(s) = err {
+            assert_eq!(s, "Win.Test.EICAR_HDB-1 FOUND");
         } else {
             panic!("Scan error expected");
         }

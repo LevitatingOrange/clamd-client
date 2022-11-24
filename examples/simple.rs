@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use clamd_client::ClamdClientBuilder;
+use clamd_client::ClamdError;
 use eyre::Result;
 use futures::FutureExt;
 use tracing::info;
@@ -38,7 +39,7 @@ async fn main() -> Result<()> {
 
     let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
 
-    if let clamd_client::Error::ScanError(s) = err {
+    if let ClamdError::ScanError(s) = err {
         info!("Eicar scan returned that its a virus: {}", s);
     } else {
         panic!("Scan error expected");
