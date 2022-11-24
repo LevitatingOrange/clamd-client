@@ -2,7 +2,7 @@
 name = "clamd-client"
 description = "Rust async tokio client for clamd. Works with a tcp socket or with the unix socket. At the moment it will open a new socket for each command. Work in progress."
 keywords = ["clamd", "clamav", "virus-scanning", ]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Lennart Vogelsang <lennart@vogelsang.berlin>"]
 license = "MIT"
