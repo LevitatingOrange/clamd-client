@@ -3,7 +3,6 @@ use std::net::SocketAddr;
 use clamd_client::ClamdClientBuilder;
 use clamd_client::ClamdError;
 use eyre::Result;
-use futures::FutureExt;
 use tracing::info;
 use tracing_subscriber;
 
