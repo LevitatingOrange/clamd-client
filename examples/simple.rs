@@ -11,8 +11,8 @@ const NUM_BYTES: usize = 1024 * 1024;
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let address = "127.0.0.1:3310".parse::<SocketAddr>()?;
-    let mut clamd_client = ClamdClientBuilder::tcp_socket(&address).build();
+    let address = "127.0.0.1:3310";
+    let mut clamd_client = ClamdClientBuilder::tcp_socket(address).build();
     clamd_client.ping().await?;
     info!("Ping worked!");
     clamd_client.reload().await?;

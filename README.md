@@ -9,8 +9,8 @@ There should be a running clamd instance on your machine (see [Notes](#running-c
 ```rust
 #[tokio::main]
 async fn main() -> Result<()> {
-    let address = "127.0.0.1:3310".parse::<SocketAddr>()?;
-    let mut clamd_client = ClamdClientBuilder::tcp_socket(&address).build();
+    let address = "127.0.0.1:3310";
+    let mut clamd_client = ClamdClientBuilder::tcp_socket(address).build();
 
     let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
         .await?
@@ -36,3 +36,4 @@ docker run -p 3310:3310  -v /run/clamav/:/run/clamav/  clamav/clamav:unstable
 - Implement keepalive tcp connection
 - check whether this can also be used with other async runtimes
 - github actions `cargo test`
+- using unix socket requires setting `<String, str>` type bounds.
