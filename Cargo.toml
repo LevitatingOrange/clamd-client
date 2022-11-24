@@ -2,11 +2,13 @@
 name = "clamd-client"
 version = "0.1.0"
 edition = "2021"
+authors = ["Lennart Vogelsang <lennart@vogelsang.berlin"]
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1", features = ["net"]}
+tokio = { version = "1", features = ["net", "io-util", "fs"]}
 futures = { version = "0.3" }
 tracing = { version = "0.1" }
 thiserror = { version = "1.0" }

@@ -1,3 +1,9 @@
+//! # clamd-client
+//!
+//! `clamd-client`: Rust async tokio client for clamd. Works with a
+//! tcp socket or with the unix socket. At the moment it will open a
+//! new socket for each command. Work in progress.
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::SinkExt;
 use futures::StreamExt;
