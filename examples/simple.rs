@@ -37,12 +37,8 @@ async fn main() -> Result<()> {
         .await?;
 
     let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
-
-    if let ClamdError::ScanError(s) = err {
-        info!("Eicar scan returned that its a virus: {}", s);
-    } else {
-        panic!("Scan error expected");
-    }
+    let msg = err.scan_error().unwrap();
+    info!("Eicar scan returned that its a virus: {}", msg);
 
     Ok(())
 }
