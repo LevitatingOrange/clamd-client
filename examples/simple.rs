@@ -12,7 +12,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let address = "127.0.0.1:3310";
-    let mut clamd_client = ClamdClientBuilder::tcp_socket(address).build();
+    let mut clamd_client = ClamdClientBuilder::tcp_socket(&address.parse()?).build();
     clamd_client.ping().await?;
     info!("Ping worked!");
     clamd_client.reload().await?;

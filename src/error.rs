@@ -29,7 +29,6 @@ pub enum ClamdError {
         #[source]
         std::io::Error,
     ),
-
     /// Occurs when the response from clamd is not what the library
     /// expects. Contains the invalid response.
     #[error("invalid response from clamd: {0}")]

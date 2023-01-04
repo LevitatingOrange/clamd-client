@@ -11,13 +11,17 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::SinkExt;
 use futures::StreamExt;
+use socket2::SockRef;
 use std::io::Cursor;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio::net::{TcpStream, ToSocketAddrs, UnixStream};
+use tokio::net::{TcpStream, UnixStream};
 use tokio_util::codec::Decoder;
 use tokio_util::codec::Encoder;
 use tokio_util::codec::Framed;
@@ -41,6 +45,9 @@ enum ClamdRequestMessage {
     StartStream,
     StreamChunk(Bytes),
     EndStream,
+    StartSession,
+    EndSession,
+    ContScan(PathBuf),
 }
 
 struct ClamdZeroDelimitedCodec {
@@ -106,6 +113,26 @@ impl Encoder<ClamdRequestMessage> for ClamdZeroDelimitedCodec {
                 dst.put_u32(0);
                 Ok(())
             }
+            ClamdRequestMessage::StartSession => {
+                dst.reserve(10);
+                dst.put(&b"zIDSESSION"[..]);
+                dst.put_u8(0);
+                Ok(())
+            }
+            ClamdRequestMessage::EndSession => {
+                dst.reserve(10);
+                dst.put(&b"zEND"[..]);
+                dst.put_u8(0);
+                Ok(())
+            }
+            ClamdRequestMessage::ContScan(path) => {
+                dst.reserve(10);
+                dst.put(&b"zCONTSCAN "[..]);
+                // TODO: safety
+                dst.put(path.to_str().unwrap().as_bytes());
+                dst.put_u8(0);
+                Ok(())
+            }
         }
     }
 }
@@ -130,8 +157,8 @@ impl Decoder for ClamdZeroDelimitedCodec {
     }
 }
 
-enum SocketType<T: ToSocketAddrs + ToOwned<Owned = T>> {
-    Tcp(T),
+enum SocketType {
+    Tcp(SocketAddr),
     #[cfg(target_family = "unix")]
     Unix(PathBuf),
 }
@@ -193,8 +220,8 @@ impl AsyncWrite for SocketWrapper {
     }
 }
 
-enum SocketTypeBuilder<'a, T: ToSocketAddrs + Clone, B: ToOwned<Owned = T> + ?Sized> {
-    Tcp(&'a B),
+enum SocketTypeBuilder<'a> {
+    Tcp(&'a SocketAddr),
     #[cfg(target_family = "unix")]
     Unix(&'a Path),
 }
@@ -207,24 +234,18 @@ enum SocketTypeBuilder<'a, T: ToSocketAddrs + Clone, B: ToOwned<Owned = T> + ?Si
 /// # use eyre::Result;
 /// # async fn doc() -> eyre::Result<()> {
 /// let address = "127.0.0.1:3310";
-/// let mut clamd_client = ClamdClientBuilder::tcp_socket(address).chunk_size(4096).build();
+/// let mut clamd_client = ClamdClientBuilder::tcp_socket(&address.parse()?).chunk_size(4096).build();
 /// # Ok(())
 /// # }
 /// ```
-pub struct ClamdClientBuilder<'a, T: ToSocketAddrs + Clone, B: ToOwned<Owned = T> + ?Sized> {
-    socket_type: SocketTypeBuilder<'a, T, B>,
+pub struct ClamdClientBuilder<'a> {
+    socket_type: SocketTypeBuilder<'a>,
     connection_type: ConnectionType,
     chunk_size: usize,
 }
 
-impl<'a, T, B> ClamdClientBuilder<'a, T, B>
-where
-    T: ToSocketAddrs + Clone,
-    B: ToOwned<Owned = T> + ?Sized,
-{
-    /// Build a [`ClamdClient`] from the path to the unix socket of `clamd`. Currently
-    /// this is a litte bit ugly, you have to define the types used for the tcp version. If someone
-    /// has an idea to make this more ergonomic by eliding the types somehow, please open an issue.
+impl<'a> ClamdClientBuilder<'a> {
+    /// Build a [`ClamdClient`] from the path to the unix socket of `clamd`.
     /// # Example
     /// ```rust
     /// # use std::net::SocketAddr;
@@ -233,10 +254,9 @@ where
     /// # async fn doc() -> eyre::Result<()> {
     /// let path = "/var/run/clamav/clamd.sock";
     /// // define placeholder types here that implement `ToSocketAddrs`
-    /// let mut clamd_client = ClamdClientBuilder::<String, str>::tcp_socket(path).chunk_size(4096).build();
+    /// let mut clamd_client = ClamdClientBuilder::unix_socket(path).chunk_size(4096).build();
     /// # Ok(())
     /// # }
-
     pub fn unix_socket<P: AsRef<Path> + ?Sized>(path: &'a P) -> Self {
         Self {
             socket_type: SocketTypeBuilder::Unix(path.as_ref()),
@@ -245,7 +265,7 @@ where
         }
     }
     /// Build a [`ClamdClient`] from the socket address to the tcp socket of `clamd`.
-    pub fn tcp_socket(addr: &'a B) -> Self {
+    pub fn tcp_socket(addr: &'a SocketAddr) -> Self {
         Self {
             socket_type: SocketTypeBuilder::Tcp(addr),
             connection_type: ConnectionType::Oneshot,
@@ -259,8 +279,20 @@ where
         self
     }
 
+    /// Creates a clamd IDSESSION that stays alive until
+    /// [`ClamdRequestMessage::EndSession`] is sent.
+    /// If `tcp_socket`, sets the underlying socket in keep alive mode.
+    pub fn keep_alive(&'a mut self, keep_alive: bool) -> &'a mut Self {
+        if keep_alive {
+            self.connection_type = ConnectionType::KeepAlive;
+        } else {
+            self.connection_type = ConnectionType::Oneshot;
+        }
+        self
+    }
+
     /// Create [`ClamdClient`] with provided configuration.
-    pub fn build(&'a self) -> ClamdClient<T> {
+    pub fn build(&'a self) -> ClamdClient {
         ClamdClient {
             socket_type: match self.socket_type {
                 SocketTypeBuilder::Tcp(t) => SocketType::Tcp(t.to_owned()),
@@ -268,6 +300,7 @@ where
             },
             connection_type: self.connection_type,
             chunk_size: self.chunk_size,
+            socket: None,
         }
     }
 }
@@ -285,42 +318,78 @@ where
 /// # use eyre::Result;
 /// # async fn doc() -> eyre::Result<()> {
 /// let address = "127.0.0.1:3310";
-/// let mut clamd_client = ClamdClientBuilder::tcp_socket(address).build();
+/// let mut clamd_client = ClamdClientBuilder::tcp_socket(&address.parse()?).build();
 /// clamd_client.ping().await?;
 /// # Ok(())
 /// # }
 /// ```
-pub struct ClamdClient<T: ToSocketAddrs + ToOwned<Owned = T>> {
-    //codec: Framed<T, ClamdZeroDelimitedCodec>,
-    socket_type: SocketType<T>,
+pub struct ClamdClient {
+    socket_type: SocketType,
     connection_type: ConnectionType,
     chunk_size: usize,
+    socket: Option<Arc<Mutex<Framed<SocketWrapper, ClamdZeroDelimitedCodec>>>>,
 }
 
-impl<T: ToSocketAddrs + ToOwned<Owned = T>> ClamdClient<T> {
-    async fn connect(&mut self) -> Result<Framed<SocketWrapper, ClamdZeroDelimitedCodec>> {
+impl ClamdClient {
+    async fn connect(
+        &mut self,
+    ) -> Result<std::sync::MutexGuard<'_, Framed<SocketWrapper, ClamdZeroDelimitedCodec>>> {
         let codec = ClamdZeroDelimitedCodec::new();
-        match &self.connection_type {
+        self.socket = match &self.connection_type {
             ConnectionType::Oneshot => match &self.socket_type {
-                SocketType::Tcp(address) => Ok(Framed::new(
+                SocketType::Tcp(address) => Some(Arc::new(Mutex::new(Framed::new(
                     SocketWrapper::Tcp(
                         TcpStream::connect(address)
                             .await
                             .map_err(ClamdError::ConnectError)?,
                     ),
                     codec,
-                )),
-                SocketType::Unix(path) => Ok(Framed::new(
+                )))),
+                SocketType::Unix(path) => Some(Arc::new(Mutex::new(Framed::new(
                     SocketWrapper::Unix(
                         UnixStream::connect(path)
                             .await
                             .map_err(ClamdError::ConnectError)?,
                     ),
                     codec,
-                )),
+                )))),
             },
-            ConnectionType::KeepAlive => todo!(),
-        }
+            ConnectionType::KeepAlive => {
+                if self.socket.is_none() {
+                    match &self.socket_type {
+                        SocketType::Tcp(address) => {
+                            let stream = TcpStream::connect(address).await?;
+                            let socket_ref = SockRef::from(&stream);
+                            socket_ref.set_keepalive(true)?;
+                            let socket = Arc::new(Mutex::new(Framed::new(
+                                SocketWrapper::Tcp(stream),
+                                codec,
+                            )));
+                            let tmp = socket.clone();
+                            let mut sock = tmp.lock().unwrap();
+                            sock.send(ClamdRequestMessage::StartSession).await?;
+                            Some(socket)
+                        }
+                        SocketType::Unix(path) => {
+                            let stream = UnixStream::connect(path)
+                                .await
+                                .map_err(ClamdError::ConnectError)?;
+                            let socket = Arc::new(Mutex::new(Framed::new(
+                                SocketWrapper::Unix(stream),
+                                codec,
+                            )));
+                            let tmp = socket.clone();
+                            let mut sock = tmp.lock().unwrap();
+                            sock.send(ClamdRequestMessage::StartSession).await?;
+                            Some(socket)
+                        }
+                    }
+                } else {
+                    self.socket.clone()
+                }
+            }
+        };
+        Ok(self.socket.as_mut().unwrap().lock().unwrap())
     }
 
     /// Ping clamd. If it responds normally (with `PONG`) this function returns `Ok(())`, otherwise
@@ -330,7 +399,7 @@ impl<T: ToSocketAddrs + ToOwned<Owned = T>> ClamdClient<T> {
         sock.send(ClamdRequestMessage::Ping).await?;
         trace!("Sent ping to clamd");
         if let Some(s) = sock.next().await.transpose()? {
-            if s == "PONG" {
+            if s.ends_with("PONG") {
                 trace!("Received pong from clamd");
                 Ok(())
             } else {
@@ -419,15 +488,15 @@ impl<T: ToSocketAddrs + ToOwned<Owned = T>> ClamdClient<T> {
         &mut self,
         mut to_scan: R,
     ) -> Result<()> {
-        let mut sock = self.connect().await?;
         let mut buf = BytesMut::with_capacity(self.chunk_size);
+        let mut sock = self.connect().await?;
 
         sock.send(ClamdRequestMessage::StartStream).await?;
         trace!("Starting bytes stream to clamd");
 
         while to_scan.read_buf(&mut buf).await? != 0 {
             trace!("Sending {} bytes to clamd", buf.len());
-            sock.send(ClamdRequestMessage::StreamChunk(buf.split().freeze()))
+            sock.feed(ClamdRequestMessage::StreamChunk(buf.split().freeze()))
                 .await?;
         }
         trace!("Hit EOF, closing stream to clamd");
@@ -462,6 +531,12 @@ impl<T: ToSocketAddrs + ToOwned<Owned = T>> ClamdClient<T> {
         let reader = File::open(path_to_scan).await?;
         self.scan_reader(reader).await
     }
+
+    pub async fn end_session(&mut self) -> Result<()> {
+        let mut sock = self.connect().await?;
+        sock.send(ClamdRequestMessage::EndSession).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -470,13 +545,14 @@ mod tests {
     use super::*;
     use tracing_test::traced_test;
 
+    // TODO start clamd
     const TCP_ADDRESS: &str = "127.0.0.1:3310";
-    const UNIX_SOCKET_PATH: &str = "/run/clamav/clamd.sock";
+    const UNIX_SOCKET_PATH: &str = "clamd.sock";
 
     #[tokio::test]
     #[traced_test]
     async fn tcp_common_operations() -> eyre::Result<()> {
-        let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS).build();
+        let mut clamd_client = ClamdClientBuilder::tcp_socket(&TCP_ADDRESS.parse()?).build();
         clamd_client.ping().await?;
         let version = clamd_client.version().await?;
         assert!(!version.is_empty());
@@ -492,7 +568,7 @@ mod tests {
 
         let random_bytes: Vec<u8> = (0..NUM_BYTES).map(|_| rand::random::<u8>()).collect();
 
-        let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS).build();
+        let mut clamd_client = ClamdClientBuilder::tcp_socket(&TCP_ADDRESS.parse()?).build();
         clamd_client.scan_bytes(&random_bytes).await?;
         Ok(())
     }
@@ -505,7 +581,7 @@ mod tests {
             .bytes()
             .await?;
 
-        let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS).build();
+        let mut clamd_client = ClamdClientBuilder::tcp_socket(&TCP_ADDRESS.parse()?).build();
         let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
         if let ClamdError::ScanError(s) = err {
             assert_eq!(s, "Win.Test.EICAR_HDB-1 FOUND");
@@ -518,7 +594,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn tcp_reload() -> eyre::Result<()> {
-        let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS).build();
+        let mut clamd_client = ClamdClientBuilder::tcp_socket(&TCP_ADDRESS.parse()?).build();
         clamd_client.reload().await?;
         Ok(())
     }
@@ -526,8 +602,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn unix_socket_common_operations() -> eyre::Result<()> {
-        let mut clamd_client =
-            ClamdClientBuilder::<String, str>::unix_socket(UNIX_SOCKET_PATH).build();
+        let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
         clamd_client.ping().await?;
         let version = clamd_client.version().await?;
         assert!(!version.is_empty());
@@ -542,8 +617,7 @@ mod tests {
         const NUM_BYTES: usize = 1024 * 1024;
 
         let random_bytes: Vec<u8> = (0..NUM_BYTES).map(|_| rand::random::<u8>()).collect();
-        let mut clamd_client =
-            ClamdClientBuilder::<String, str>::unix_socket(UNIX_SOCKET_PATH).build();
+        let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
 
         clamd_client.scan_bytes(&random_bytes).await?;
         Ok(())
@@ -556,8 +630,7 @@ mod tests {
             .await?
             .bytes()
             .await?;
-        let mut clamd_client =
-            ClamdClientBuilder::<String, str>::unix_socket(UNIX_SOCKET_PATH).build();
+        let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
 
         let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
         if let ClamdError::ScanError(s) = err {
@@ -571,10 +644,25 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn unix_socket_reload() -> eyre::Result<()> {
-        let mut clamd_client =
-            ClamdClientBuilder::<String, str>::unix_socket(UNIX_SOCKET_PATH).build();
+        let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
 
         clamd_client.reload().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn keep_alive() -> eyre::Result<()> {
+        let mut clamd_client = ClamdClientBuilder::tcp_socket(&TCP_ADDRESS.parse()?)
+            .keep_alive(true)
+            .build();
+        clamd_client.ping().await?;
+        clamd_client.ping().await?;
+        let stats = clamd_client.stats().await?;
+        assert!(!stats.is_empty());
+        let version = clamd_client.version().await?;
+        assert!(!version.is_empty());
+        clamd_client.end_session().await?;
         Ok(())
     }
 }
