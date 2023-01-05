@@ -550,26 +550,54 @@ impl ClamdClient {
 mod tests {
 
     use super::*;
-    // use std::sync::Once;
+    use std::process::Command;
+    use std::sync::Once;
     use tracing_test::traced_test;
 
     // TODO start clamd
     const TCP_ADDRESS: &str = "127.0.0.1:3310";
     const UNIX_SOCKET_PATH: &str = "clamd.sock";
-    // static INIT: Once = Once::new();
+    static INIT: Once = Once::new();
 
-    // async fn setup_clamav() -> () {
-    //     // check if clamd bin is already present
-    //     // download it if not
-    //     // run `clamd -c clamd.conf`
-    //     // gitignore bin
-    //     // add github action test
-    //     INIT.call_once(|| {});
-    // }
+    #[cfg(target_os = "macos")]
+    fn setup_clamav() -> () {
+        INIT.call_once(|| {
+            todo!();
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    fn setup_clamav() {
+        INIT.call_once(|| {
+            match Command::new("clamd").arg("-c").arg("clamd.conf").status() {
+                Ok(_) => (),
+                Err(_) => {
+                    Command::new("apt")
+                        .arg("install")
+                        .arg("clamav-daemon")
+                        .status()
+                        .unwrap();
+                    Command::new("clamd")
+                        .arg("-c")
+                        .arg("clamd.conf")
+                        .status()
+                        .unwrap();
+                }
+            };
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn setup_clamav() -> () {
+        INIT.call_once(|| {
+            todo!();
+        });
+    }
 
     #[tokio::test]
     #[traced_test]
     async fn tcp_common_operations() -> eyre::Result<()> {
+        setup_clamav();
         let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
         clamd_client.ping().await?;
         let version = clamd_client.version().await?;
@@ -582,6 +610,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn tcp_random_bytes() -> eyre::Result<()> {
+        setup_clamav();
         const NUM_BYTES: usize = 1024 * 1024;
 
         let random_bytes: Vec<u8> = (0..NUM_BYTES).map(|_| rand::random::<u8>()).collect();
@@ -594,6 +623,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn tcp_eicar() -> eyre::Result<()> {
+        setup_clamav();
         let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
             .await?
             .bytes()
@@ -612,6 +642,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn tcp_reload() -> eyre::Result<()> {
+        setup_clamav();
         let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
         clamd_client.reload().await?;
         Ok(())
@@ -620,6 +651,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn unix_socket_common_operations() -> eyre::Result<()> {
+        setup_clamav();
         let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
         clamd_client.ping().await?;
         let version = clamd_client.version().await?;
@@ -632,6 +664,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn unix_socket_random_bytes() -> eyre::Result<()> {
+        setup_clamav();
         const NUM_BYTES: usize = 1024 * 1024;
 
         let random_bytes: Vec<u8> = (0..NUM_BYTES).map(|_| rand::random::<u8>()).collect();
@@ -644,6 +677,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn unix_socket_eicar() -> eyre::Result<()> {
+        setup_clamav();
         let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
             .await?
             .bytes()
@@ -662,6 +696,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn unix_socket_reload() -> eyre::Result<()> {
+        setup_clamav();
         let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
 
         clamd_client.reload().await?;
@@ -671,6 +706,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn keep_alive() -> eyre::Result<()> {
+        setup_clamav();
         let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
             .await?
             .bytes()
