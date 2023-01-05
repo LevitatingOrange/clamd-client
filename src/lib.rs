@@ -572,23 +572,21 @@ mod tests {
             match Command::new("clamd").arg("-c").arg("clamd.conf").status() {
                 Ok(_) => (),
                 Err(_) => {
-                    Command::new("sudo")
-                        .arg("apt")
-                        .arg("install")
-                        .arg("clamav-daemon")
+                    Command::new("wget")
+                        .arg("https://www.clamav.net/downloads/production/clamav-1.0.0.linux.x86_64.deb")
                         .status()
                         .unwrap();
                     Command::new("sudo")
-                        .arg("systemctl")
-                        .arg("stop")
-                        .arg("clamav-freshclam.service")
+                        .arg("dpkg")
+                        .arg("-i")
+                        .arg("clamav-1.0.0.linux.x86_64.deb")
                         .status()
                         .unwrap();
-                    Command::new("sudo").arg("freshclam").status().unwrap();
                     Command::new("sudo")
-                        .arg("systemctl")
-                        .arg("start")
-                        .arg("clamav-freshclam.service")
+                        .arg("freshclam")
+                        .arg("-u")
+                        .arg("$(whoami)")
+                        .arg("--config-file=freshclam.conf")
                         .status()
                         .unwrap();
                     Command::new("clamd")
@@ -744,4 +742,16 @@ mod tests {
         clamd_client.end_session().await?;
         Ok(())
     }
+}
+
+#[cfg(doctest)]
+mod test_readme {
+    macro_rules! external_doc_test {
+        ($x:expr) => {
+            #[doc = $x]
+            extern "C" {}
+        };
+    }
+
+    external_doc_test!(include_str!("../README.md"));
 }
