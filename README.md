@@ -26,10 +26,20 @@ async fn main() -> eyre::Result<()> {
 }
 ```
 
-## Notes
+## Contributing
 ### testing
 
+#### `clamd` is already installed
+
+If you already have clamd installed, before running `cargo test` run :
+
+`freshclam -u $(whoami) --config-file=freshclam.conf`
+
+#### `clamd` is not installed
+
+Simply run `cargo test` and it should install `clamd` for you.
+
+## Notes
 ## TODOS
 - Implement missing clamd functionality
 - check whether this can also be used with other async runtimes
-- explain tests
