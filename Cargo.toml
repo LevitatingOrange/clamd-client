@@ -13,12 +13,13 @@ homepage = "https://github.com/LevitatingOrange/clamd-client"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1", features = ["net", "io-util", "fs"]}
-futures = { version = "0.3" }
-tracing = { version = "0.1" }
-thiserror = { version = "1.0" }
 bytes = { version = "1" }
+futures = { version = "0.3" }
+socket2 = { version = "0.4" }
+thiserror = { version = "1.0" }
+tokio = { version = "1", features = ["net", "io-util", "fs"]}
 tokio-util = { version = "0.7", features = ["codec"]}
+tracing = { version = "0.1" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
