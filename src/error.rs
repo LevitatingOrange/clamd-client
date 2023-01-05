@@ -10,6 +10,9 @@ pub type Result<T> = std::result::Result<T, ClamdError>;
 /// Errors that can occur when using [`ClamdClient`].
 #[derive(Debug, thiserror::Error)]
 pub enum ClamdError {
+    /// Occurs when the socket address input could not be parsed.
+    #[error("error parsing socket address: {0}")]
+    AddrParsingError(#[source] std::io::Error),
     /// Occurs when the custom set chunk size is larger than
     /// [`std::u32::MAX`].
     #[error("could not send chunk: too large: {0}")]
@@ -59,7 +62,7 @@ impl ClamdError {
     /// # use eyre::Result;
     /// # async fn doc() -> eyre::Result<()> {
     /// let address = "127.0.0.1:3310".parse::<SocketAddr>()?;
-    /// let mut clamd_client = ClamdClientBuilder::tcp_socket(&address).build();
+    /// let mut clamd_client = ClamdClientBuilder::tcp_socket(address)?.build();
     ///
     /// // This downloads a virus signature that is benign but trips clamd.
     /// let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
