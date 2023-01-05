@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
+use tokio::sync::MappedMutexGuard;
 use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
 use tokio_util::codec::Decoder;
@@ -306,7 +307,7 @@ impl ClamdClientBuilder {
                     SocketTypeBuilder::Tcp(t) => SocketType::Tcp(t.to_owned()),
                     SocketTypeBuilder::Unix(u) => SocketType::Unix(u.to_owned()),
                 },
-                state: Mutex::new(ConnectedSocket { socket: None }),
+                state: Mutex::new(None),
             }),
         }
     }
@@ -330,6 +331,7 @@ impl ClamdClientBuilder {
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct ClamdClient {
     shared: Arc<Shared>,
 }
@@ -341,17 +343,17 @@ struct Shared {
     state: Mutex<ConnectedSocket>,
 }
 
-struct ConnectedSocket {
-    socket: Option<Framed<SocketWrapper, ClamdZeroDelimitedCodec>>,
-}
+type ConnectedSocket = Option<Framed<SocketWrapper, ClamdZeroDelimitedCodec>>;
 
 impl ClamdClient {
-    async fn connect(&mut self) -> Result<MutexGuard<'_, ConnectedSocket>> {
+    async fn connect(
+        &mut self,
+    ) -> Result<MappedMutexGuard<'_, Framed<SocketWrapper, ClamdZeroDelimitedCodec>>> {
         let codec = ClamdZeroDelimitedCodec::new();
-        let mut guard = self.shared.state.lock().await;
+        let mut guard = MutexGuard::map(self.shared.state.lock().await, |s| s);
         match &self.shared.connection_type {
             ConnectionType::Oneshot => {
-                guard.socket = match &self.shared.socket_type {
+                *guard = match &self.shared.socket_type {
                     SocketType::Tcp(address) => Some(Framed::new(
                         SocketWrapper::Tcp(
                             TcpStream::connect(address)
@@ -371,8 +373,8 @@ impl ClamdClient {
                 }
             }
             ConnectionType::KeepAlive => {
-                if guard.socket.is_none() {
-                    guard.socket = match &self.shared.socket_type {
+                if guard.is_none() {
+                    *guard = match &self.shared.socket_type {
                         SocketType::Tcp(address) => {
                             let stream = TcpStream::connect(address).await?;
                             let socket_ref = SockRef::from(&stream);
@@ -393,15 +395,16 @@ impl ClamdClient {
                 }
             }
         };
-        Ok(guard)
+        drop(guard);
+        Ok(MutexGuard::map(self.shared.state.lock().await, |s| {
+            s.as_mut().unwrap()
+        }))
     }
 
     /// Ping clamd. If it responds normally (with `PONG`) this function returns `Ok(())`, otherwise
     /// returns with error.
     pub async fn ping(&mut self) -> Result<()> {
-        let mut socket = self.connect().await?;
-        // Safety: socket will be created in `connect()`
-        let sock = socket.socket.as_mut().unwrap();
+        let mut sock = self.connect().await?;
         sock.send(ClamdRequestMessage::Ping).await?;
         trace!("Sent ping to clamd");
         if let Some(s) = sock.next().await.transpose()? {
@@ -418,9 +421,7 @@ impl ClamdClient {
 
     /// Get `clamd` version string.
     pub async fn version(&mut self) -> Result<String> {
-        let mut socket = self.connect().await?;
-        // Safety: socket will be created in `connect()`
-        let sock = socket.socket.as_mut().unwrap();
+        let mut sock = self.connect().await?;
         sock.send(ClamdRequestMessage::Version).await?;
         trace!("Sent version request to clamd");
 
@@ -434,9 +435,7 @@ impl ClamdClient {
 
     /// Reload `clamd`.
     pub async fn reload(&mut self) -> Result<()> {
-        let mut socket = self.connect().await?;
-        // Safety: socket will be created in `connect()`
-        let sock = socket.socket.as_mut().unwrap();
+        let mut sock = self.connect().await?;
         sock.send(ClamdRequestMessage::Reload).await?;
         trace!("Sent reload request to clamd");
         if let Some(s) = sock.next().await.transpose()? {
@@ -457,9 +456,7 @@ impl ClamdClient {
 
     /// Get `clamd` stats.
     pub async fn stats(&mut self) -> Result<String> {
-        let mut socket = self.connect().await?;
-        // Safety: socket will be created in `connect()`
-        let sock = socket.socket.as_mut().unwrap();
+        let mut sock = self.connect().await?;
         sock.send(ClamdRequestMessage::Stats).await?;
         trace!("Sent stats request to clamd");
 
@@ -477,9 +474,7 @@ impl ClamdClient {
 
     /// Shutdown clamd. Careful: There is no way to start clamd again from this library.
     pub async fn shutdown(mut self) -> Result<()> {
-        let mut socket = self.connect().await?;
-        // Safety: socket will be created in `connect()`
-        let sock = socket.socket.as_mut().unwrap();
+        let mut sock = self.connect().await?;
         trace!("Sent shutdown request to clamd");
         sock.send(ClamdRequestMessage::Shutdown).await?;
         Ok(())
@@ -502,9 +497,7 @@ impl ClamdClient {
         mut to_scan: R,
     ) -> Result<()> {
         let mut buf = BytesMut::with_capacity(self.shared.chunk_size);
-        let mut socket = self.connect().await?;
-        // Safety: socket will be created in `connect()`
-        let sock = socket.socket.as_mut().unwrap();
+        let mut sock = self.connect().await?;
 
         sock.send(ClamdRequestMessage::StartStream).await?;
         trace!("Starting bytes stream to clamd");
@@ -548,9 +541,7 @@ impl ClamdClient {
     }
 
     pub async fn end_session(&mut self) -> Result<()> {
-        let mut socket = self.connect().await?;
-        // Safety: socket will be created in `connect()`
-        let sock = socket.socket.as_mut().unwrap();
+        let mut sock = self.connect().await?;
         sock.send(ClamdRequestMessage::EndSession).await?;
         Ok(())
     }
