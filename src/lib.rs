@@ -578,7 +578,19 @@ mod tests {
                         .arg("clamav-daemon")
                         .status()
                         .unwrap();
+                    Command::new("sudo")
+                        .arg("systemctl")
+                        .arg("stop")
+                        .arg("clamav-freshclam.service")
+                        .status()
+                        .unwrap();
                     Command::new("sudo").arg("freshclam").status().unwrap();
+                    Command::new("sudo")
+                        .arg("systemctl")
+                        .arg("start")
+                        .arg("clamav-freshclam.service")
+                        .status()
+                        .unwrap();
                     Command::new("clamd")
                         .arg("-c")
                         .arg("clamd.conf")
