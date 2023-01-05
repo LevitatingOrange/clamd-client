@@ -1,2 +1,8 @@
 target/
 *.~undo-tree~
+
+# clamd
+*.cvd
+*.cld
+*.dat
+*.log
