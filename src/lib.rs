@@ -559,8 +559,43 @@ mod tests {
     const UNIX_SOCKET_PATH: &str = "clamd.sock";
     static INIT: Once = Once::new();
 
+    fn generate_config_files() {
+        let database_dir = format!(
+            "DatabaseDirectory {}\n",
+            std::env::current_dir().unwrap().to_str().unwrap()
+        );
+        let mut clamd_conf = "
+TCPAddr localhost
+TCPSocket 3310
+LocalSocket clamd.sock
+FixStaleSocket true
+LocalSocketMode 666
+"
+        .to_string();
+        let mut freshclam_conf = "
+UpdateLogFile freshclam.log
+Foreground true
+Debug false
+MaxAttempts 5
+DNSDatabaseInfo current.cvd.clamav.net
+DatabaseMirror db.local.clamav.net
+DatabaseMirror database.clamav.net
+ConnectTimeout 30
+ReceiveTimeout 0
+TestDatabases yes
+CompressLocalDatabase no
+Bytecode true
+NotifyClamd clamd.conf
+"
+        .to_string();
+        clamd_conf.push_str(&database_dir);
+        freshclam_conf.push_str(&database_dir);
+        std::fs::write("clamd.conf", clamd_conf).unwrap();
+        std::fs::write("freshclam.conf", freshclam_conf).unwrap();
+    }
+
     #[cfg(target_os = "macos")]
-    fn setup_clamav() -> () {
+    fn setup_clamav() {
         INIT.call_once(|| {
             todo!();
         });
@@ -569,6 +604,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn setup_clamav() {
         INIT.call_once(|| {
+            generate_config_files();
             match Command::new("clamd").arg("-c").arg("clamd.conf").status() {
                 Ok(_) => (),
                 Err(_) => {
@@ -601,7 +637,7 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
-    fn setup_clamav() -> () {
+    fn setup_clamav() {
         INIT.call_once(|| {
             todo!();
         });

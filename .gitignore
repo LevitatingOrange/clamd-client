@@ -6,3 +6,5 @@ target/
 *.cld
 *.dat
 *.log
+clamd.conf
+freshclam.conf
