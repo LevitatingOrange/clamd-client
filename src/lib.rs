@@ -48,7 +48,7 @@ enum ClamdRequestMessage {
     EndStream,
     StartSession,
     EndSession,
-    ContScan(PathBuf),
+    // ContScan(PathBuf),
 }
 
 struct ClamdZeroDelimitedCodec {
@@ -125,16 +125,15 @@ impl Encoder<ClamdRequestMessage> for ClamdZeroDelimitedCodec {
                 dst.put(&b"zEND"[..]);
                 dst.put_u8(0);
                 Ok(())
-            }
-            ClamdRequestMessage::ContScan(path) => {
-                // TODO: safety
-                let path = path.to_str().unwrap();
-                dst.reserve(10 + path.len());
-                dst.put(&b"zCONTSCAN "[..]);
-                dst.put(path.as_bytes());
-                dst.put_u8(0);
-                Ok(())
-            }
+            } // ClamdRequestMessage::ContScan(path) => {
+              //     // TODO: safety
+              //     let path = path.to_str().unwrap();
+              //     dst.reserve(10 + path.len());
+              //     dst.put(&b"zCONTSCAN "[..]);
+              //     dst.put(path.as_bytes());
+              //     dst.put_u8(0);
+              //     Ok(())
+              // }
         }
     }
 }
@@ -551,11 +550,22 @@ impl ClamdClient {
 mod tests {
 
     use super::*;
+    // use std::sync::Once;
     use tracing_test::traced_test;
 
     // TODO start clamd
     const TCP_ADDRESS: &str = "127.0.0.1:3310";
     const UNIX_SOCKET_PATH: &str = "clamd.sock";
+    // static INIT: Once = Once::new();
+
+    // async fn setup_clamav() -> () {
+    //     // check if clamd bin is already present
+    //     // download it if not
+    //     // run `clamd -c clamd.conf`
+    //     // gitignore bin
+    //     // add github action test
+    //     INIT.call_once(|| {});
+    // }
 
     #[tokio::test]
     #[traced_test]
