@@ -582,10 +582,11 @@ mod tests {
                         .arg("clamav-1.0.0.linux.x86_64.deb")
                         .status()
                         .unwrap();
+                    let whoami = Command::new("whoami").output().unwrap();
                     Command::new("sudo")
                         .arg("freshclam")
                         .arg("-u")
-                        .arg("$(whoami)")
+                        .arg(String::from_utf8(whoami.stdout).unwrap().trim_end())
                         .arg("--config-file=freshclam.conf")
                         .status()
                         .unwrap();
