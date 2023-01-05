@@ -605,7 +605,13 @@ NotifyClamd clamd.conf
     fn setup_clamav() {
         INIT.call_once(|| {
             generate_config_files();
-            match Command::new("clamd").arg("-c").arg("clamd.conf").status() {
+            let whoami = Command::new("whoami").output().unwrap();
+            let user = String::from_utf8(whoami.stdout).unwrap();
+            match Command::new("freshclam")
+                .arg("-u")
+                .arg(user.trim_end())
+                .arg("--config-file=freshclam.conf")
+                .status() {
                 Ok(_) => (),
                 Err(_) => {
                     Command::new("wget")
@@ -618,11 +624,10 @@ NotifyClamd clamd.conf
                         .arg("clamav-1.0.0.linux.x86_64.deb")
                         .status()
                         .unwrap();
-                    let whoami = Command::new("whoami").output().unwrap();
                     Command::new("sudo")
                         .arg("freshclam")
                         .arg("-u")
-                        .arg(String::from_utf8(whoami.stdout).unwrap().trim_end())
+                        .arg(user.trim_end())
                         .arg("--config-file=freshclam.conf")
                         .status()
                         .unwrap();
@@ -633,6 +638,7 @@ NotifyClamd clamd.conf
                         .unwrap();
                 }
             };
+            Command::new("clamd").arg("-c").arg("clamd.conf").status().unwrap();
         })
     }
 

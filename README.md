@@ -28,13 +28,6 @@ async fn main() -> eyre::Result<()> {
 
 ## Contributing
 ### testing
-
-#### `clamd` is already installed
-
-If you already have clamd installed, before running `cargo test` run :
-
-`freshclam -u $(whoami) --config-file=freshclam.conf`
-
 #### `clamd` is not installed
 
 Simply run `cargo test` and it should install `clamd` for you.
