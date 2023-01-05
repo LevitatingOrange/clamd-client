@@ -348,9 +348,9 @@ struct ConnectedSocket {
 impl ClamdClient {
     async fn connect(&mut self) -> Result<MutexGuard<'_, ConnectedSocket>> {
         let codec = ClamdZeroDelimitedCodec::new();
+        let mut guard = self.shared.state.lock().await;
         match &self.shared.connection_type {
             ConnectionType::Oneshot => {
-                let mut guard = self.shared.state.lock().await;
                 guard.socket = match &self.shared.socket_type {
                     SocketType::Tcp(address) => Some(Framed::new(
                         SocketWrapper::Tcp(
@@ -371,7 +371,6 @@ impl ClamdClient {
                 }
             }
             ConnectionType::KeepAlive => {
-                let mut guard = self.shared.state.lock().await;
                 if guard.socket.is_none() {
                     guard.socket = match &self.shared.socket_type {
                         SocketType::Tcp(address) => {
@@ -394,7 +393,7 @@ impl ClamdClient {
                 }
             }
         };
-        Ok(self.shared.state.lock().await)
+        Ok(guard)
     }
 
     /// Ping clamd. If it responds normally (with `PONG`) this function returns `Ok(())`, otherwise
