@@ -653,6 +653,11 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn keep_alive() -> eyre::Result<()> {
+        let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
+            .await?
+            .bytes()
+            .await?;
+
         let mut clamd_client = ClamdClientBuilder::tcp_socket(&TCP_ADDRESS.parse()?)
             .keep_alive(true)
             .build();
@@ -662,6 +667,12 @@ mod tests {
         assert!(!stats.is_empty());
         let version = clamd_client.version().await?;
         assert!(!version.is_empty());
+        let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
+        if let ClamdError::ScanError(s) = err {
+            assert_eq!(s, "stream: Win.Test.EICAR_HDB-1 FOUND");
+        } else {
+            panic!("Scan error expected");
+        }
         clamd_client.end_session().await?;
         Ok(())
     }
