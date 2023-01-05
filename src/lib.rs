@@ -114,22 +114,23 @@ impl Encoder<ClamdRequestMessage> for ClamdZeroDelimitedCodec {
                 Ok(())
             }
             ClamdRequestMessage::StartSession => {
-                dst.reserve(10);
+                dst.reserve(11);
                 dst.put(&b"zIDSESSION"[..]);
                 dst.put_u8(0);
                 Ok(())
             }
             ClamdRequestMessage::EndSession => {
-                dst.reserve(10);
+                dst.reserve(5);
                 dst.put(&b"zEND"[..]);
                 dst.put_u8(0);
                 Ok(())
             }
             ClamdRequestMessage::ContScan(path) => {
-                dst.reserve(10);
-                dst.put(&b"zCONTSCAN "[..]);
                 // TODO: safety
-                dst.put(path.to_str().unwrap().as_bytes());
+                let path = path.to_str().unwrap();
+                dst.reserve(10 + path.len());
+                dst.put(&b"zCONTSCAN "[..]);
+                dst.put(path.as_bytes());
                 dst.put_u8(0);
                 Ok(())
             }
