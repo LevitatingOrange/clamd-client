@@ -572,7 +572,8 @@ mod tests {
             match Command::new("clamd").arg("-c").arg("clamd.conf").status() {
                 Ok(_) => (),
                 Err(_) => {
-                    Command::new("apt")
+                    Command::new("sudo")
+                        .arg("apt")
                         .arg("install")
                         .arg("clamav-daemon")
                         .status()
