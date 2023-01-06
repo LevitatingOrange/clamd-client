@@ -8,9 +8,11 @@ See also [`examples/simple.rs`](https://github.com/LevitatingOrange/clamd-client
 There should be a running clamd instance on your machine (see [Notes](#running-clamd)).
 ```rust
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> eyre::Result<()> {
+    use clamd_client::ClamdClientBuilder;
+
     let address = "127.0.0.1:3310";
-    let mut clamd_client = ClamdClientBuilder::tcp_socket(address).build();
+    let mut clamd_client = ClamdClientBuilder::tcp_socket(address)?.build();
 
     let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
         .await?
@@ -24,16 +26,13 @@ async fn main() -> Result<()> {
 }
 ```
 
-## Notes
-### Running Clamd
-To run `cargo test` or the examples you have to have a running clamd instance on your machine. Easiest would be to use docker:
-```
-docker run -p 3310:3310  -v /run/clamav/:/run/clamav/  clamav/clamav:unstable
-```
+## Contributing
+### testing
+#### `clamd` is not installed
 
+Simply run `cargo test` and it should install `clamd` for you.
+
+## Notes
 ## TODOS
 - Implement missing clamd functionality
-- Implement keepalive tcp connection
 - check whether this can also be used with other async runtimes
-- github actions `cargo test`
-- using unix socket requires setting `<String, str>` type bounds.

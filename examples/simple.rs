@@ -1,5 +1,3 @@
-use std::net::SocketAddr;
-
 use clamd_client::ClamdClientBuilder;
 use eyre::Result;
 use tracing::info;

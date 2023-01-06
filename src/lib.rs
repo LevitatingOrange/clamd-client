@@ -48,7 +48,7 @@ enum ClamdRequestMessage {
     EndStream,
     StartSession,
     EndSession,
-    ContScan(PathBuf),
+    // ContScan(PathBuf),
 }
 
 struct ClamdZeroDelimitedCodec {
@@ -125,16 +125,15 @@ impl Encoder<ClamdRequestMessage> for ClamdZeroDelimitedCodec {
                 dst.put(&b"zEND"[..]);
                 dst.put_u8(0);
                 Ok(())
-            }
-            ClamdRequestMessage::ContScan(path) => {
-                // TODO: safety
-                let path = path.to_str().unwrap();
-                dst.reserve(10 + path.len());
-                dst.put(&b"zCONTSCAN "[..]);
-                dst.put(path.as_bytes());
-                dst.put_u8(0);
-                Ok(())
-            }
+            } // ClamdRequestMessage::ContScan(path) => {
+              //     // TODO: safety
+              //     let path = path.to_str().unwrap();
+              //     dst.reserve(10 + path.len());
+              //     dst.put(&b"zCONTSCAN "[..]);
+              //     dst.put(path.as_bytes());
+              //     dst.put_u8(0);
+              //     Ok(())
+              // }
         }
     }
 }
@@ -551,15 +550,109 @@ impl ClamdClient {
 mod tests {
 
     use super::*;
+    use std::process::Command;
+    use std::sync::Once;
     use tracing_test::traced_test;
 
     // TODO start clamd
     const TCP_ADDRESS: &str = "127.0.0.1:3310";
     const UNIX_SOCKET_PATH: &str = "clamd.sock";
+    static INIT: Once = Once::new();
+
+    fn generate_config_files() {
+        let database_dir = format!(
+            "DatabaseDirectory {}\n",
+            std::env::current_dir().unwrap().to_str().unwrap()
+        );
+        let mut clamd_conf = "
+TCPAddr localhost
+TCPSocket 3310
+LocalSocket clamd.sock
+FixStaleSocket true
+LocalSocketMode 666
+"
+        .to_string();
+        let mut freshclam_conf = "
+UpdateLogFile freshclam.log
+Foreground true
+Debug false
+MaxAttempts 5
+DNSDatabaseInfo current.cvd.clamav.net
+DatabaseMirror db.local.clamav.net
+DatabaseMirror database.clamav.net
+ConnectTimeout 30
+ReceiveTimeout 0
+TestDatabases yes
+CompressLocalDatabase no
+Bytecode true
+NotifyClamd clamd.conf
+"
+        .to_string();
+        clamd_conf.push_str(&database_dir);
+        freshclam_conf.push_str(&database_dir);
+        std::fs::write("clamd.conf", clamd_conf).unwrap();
+        std::fs::write("freshclam.conf", freshclam_conf).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn setup_clamav() {
+        INIT.call_once(|| {
+            todo!();
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    fn setup_clamav() {
+        INIT.call_once(|| {
+            generate_config_files();
+            let whoami = Command::new("whoami").output().unwrap();
+            let user = String::from_utf8(whoami.stdout).unwrap();
+            match Command::new("freshclam")
+                .arg("-u")
+                .arg(user.trim_end())
+                .arg("--config-file=freshclam.conf")
+                .status() {
+                Ok(_) => (),
+                Err(_) => {
+                    Command::new("wget")
+                        .arg("https://www.clamav.net/downloads/production/clamav-1.0.0.linux.x86_64.deb")
+                        .status()
+                        .unwrap();
+                    Command::new("sudo")
+                        .arg("dpkg")
+                        .arg("-i")
+                        .arg("clamav-1.0.0.linux.x86_64.deb")
+                        .status()
+                        .unwrap();
+                    Command::new("sudo")
+                        .arg("freshclam")
+                        .arg("-u")
+                        .arg(user.trim_end())
+                        .arg("--config-file=freshclam.conf")
+                        .status()
+                        .unwrap();
+                    Command::new("clamd")
+                        .arg("-c")
+                        .arg("clamd.conf")
+                        .status()
+                        .unwrap();
+                }
+            };
+            Command::new("clamd").arg("-c").arg("clamd.conf").status().unwrap();
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn setup_clamav() {
+        INIT.call_once(|| {
+            todo!();
+        });
+    }
 
     #[tokio::test]
     #[traced_test]
     async fn tcp_common_operations() -> eyre::Result<()> {
+        setup_clamav();
         let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
         clamd_client.ping().await?;
         let version = clamd_client.version().await?;
@@ -572,6 +665,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn tcp_random_bytes() -> eyre::Result<()> {
+        setup_clamav();
         const NUM_BYTES: usize = 1024 * 1024;
 
         let random_bytes: Vec<u8> = (0..NUM_BYTES).map(|_| rand::random::<u8>()).collect();
@@ -584,6 +678,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn tcp_eicar() -> eyre::Result<()> {
+        setup_clamav();
         let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
             .await?
             .bytes()
@@ -602,6 +697,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn tcp_reload() -> eyre::Result<()> {
+        setup_clamav();
         let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
         clamd_client.reload().await?;
         Ok(())
@@ -610,6 +706,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn unix_socket_common_operations() -> eyre::Result<()> {
+        setup_clamav();
         let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
         clamd_client.ping().await?;
         let version = clamd_client.version().await?;
@@ -622,6 +719,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn unix_socket_random_bytes() -> eyre::Result<()> {
+        setup_clamav();
         const NUM_BYTES: usize = 1024 * 1024;
 
         let random_bytes: Vec<u8> = (0..NUM_BYTES).map(|_| rand::random::<u8>()).collect();
@@ -634,6 +732,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn unix_socket_eicar() -> eyre::Result<()> {
+        setup_clamav();
         let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
             .await?
             .bytes()
@@ -652,6 +751,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn unix_socket_reload() -> eyre::Result<()> {
+        setup_clamav();
         let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
 
         clamd_client.reload().await?;
@@ -661,6 +761,7 @@ mod tests {
     #[tokio::test]
     #[traced_test]
     async fn keep_alive() -> eyre::Result<()> {
+        setup_clamav();
         let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
             .await?
             .bytes()
@@ -684,4 +785,16 @@ mod tests {
         clamd_client.end_session().await?;
         Ok(())
     }
+}
+
+#[cfg(doctest)]
+mod test_readme {
+    macro_rules! external_doc_test {
+        ($x:expr) => {
+            #[doc = $x]
+            extern "C" {}
+        };
+    }
+
+    external_doc_test!(include_str!("../README.md"));
 }

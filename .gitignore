@@ -1,2 +1,10 @@
 target/
 *.~undo-tree~
+
+# clamd
+*.cvd
+*.cld
+*.dat
+*.log
+clamd.conf
+freshclam.conf
