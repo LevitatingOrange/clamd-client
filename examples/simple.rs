@@ -1,4 +1,4 @@
-use clamd_client::ClamdClientBuilder;
+use clamd_client::{ClamdClientBuilder, ScanResult};
 use eyre::Result;
 use tracing::info;
 use tracing_subscriber;
@@ -33,9 +33,13 @@ async fn main() -> Result<()> {
         .bytes()
         .await?;
 
-    let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
-    let msg = err.scan_error().unwrap();
-    info!("Eicar scan returned that its a virus: {}", msg);
+    let result = clamd_client.scan_bytes(&eicar_bytes).await?;
+    match result {
+        ScanResult::Malignent { infection_types } => {
+            info!("clamd found a virus(es):\n{}", infection_types.join("\n"))
+        }
+        _ => (),
+    };
 
     Ok(())
 }

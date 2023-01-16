@@ -125,11 +125,11 @@ impl Encoder<ClamdRequestMessage> for ClamdZeroDelimitedCodec {
                 dst.put(&b"zEND"[..]);
                 dst.put_u8(0);
                 Ok(())
-            } // ClamdRequestMessage::ContScan(path) => {
+            } // ClamdRequestMessage::AllMatch(path) => {
               //     // TODO: safety
               //     let path = path.to_str().unwrap();
               //     dst.reserve(10 + path.len());
-              //     dst.put(&b"zCONTSCAN "[..]);
+              //     dst.put(&b"zALLMATCH "[..]);
               //     dst.put(path.as_bytes());
               //     dst.put_u8(0);
               //     Ok(())
@@ -308,6 +308,37 @@ impl ClamdClientBuilder {
                 },
                 state: Mutex::new(None),
             }),
+        }
+    }
+}
+
+pub enum ScanResult {
+    Benign,
+    Malignent { infection_types: Vec<String> },
+}
+
+impl ScanResult {
+    pub(crate) fn from_output(out: &str) -> Result<Self> {
+        println!("{}", out);
+        if out.contains("OK") {
+            Ok(ScanResult::Benign)
+        } else {
+            let mut infection_types: Vec<String> = Vec::new();
+            let results = out.split_terminator("\0");
+            for result in results {
+                let virus = result
+                    .split_at(
+                        result
+                            .rfind(':')
+                            .ok_or_else(|| ClamdError::IncompleteResponse(out.to_string()))?
+                            + 1,
+                    )
+                    .1
+                    .trim()
+                    .replace(" FOUND", "");
+                infection_types.push(virus);
+            }
+            Ok(ScanResult::Malignent { infection_types })
         }
     }
 }
@@ -494,7 +525,7 @@ impl ClamdClient {
     pub async fn scan_reader<R: AsyncRead + AsyncReadExt + Unpin>(
         &mut self,
         mut to_scan: R,
-    ) -> Result<()> {
+    ) -> Result<ScanResult> {
         let mut buf = BytesMut::with_capacity(self.shared.chunk_size);
         let mut sock = self.connect().await?;
 
@@ -509,16 +540,7 @@ impl ClamdClient {
         trace!("Hit EOF, closing stream to clamd");
         sock.send(ClamdRequestMessage::EndStream).await?;
         if let Some(s) = sock.next().await.transpose()? {
-            let msg = s
-                .split_once(':')
-                .map(|(_, msg)| msg.trim())
-                .ok_or_else(|| ClamdError::IncompleteResponse(s.clone()))?;
-
-            if msg == "OK" {
-                Ok(())
-            } else {
-                Err(ClamdError::ScanError(msg.to_owned()))
-            }
+            Ok(ScanResult::from_output(&s)?)
         } else {
             Err(ClamdError::NoResponse)
         }
@@ -526,7 +548,7 @@ impl ClamdClient {
 
     /// Convienence method to scan a bytes slice. Wraps [`ClamdClient::scan_reader`], so see there
     /// for more information.
-    pub async fn scan_bytes(&mut self, to_scan: &[u8]) -> Result<()> {
+    pub async fn scan_bytes(&mut self, to_scan: &[u8]) -> Result<ScanResult> {
         let cursor = Cursor::new(to_scan);
         self.scan_reader(cursor).await
     }
@@ -534,7 +556,7 @@ impl ClamdClient {
     /// Convienence method to directly scan a file under the given
     /// path. This will read the file and stream it to clamd. Wraps
     /// [`ClamdClient::scan_reader`], so see there for more information.
-    pub async fn scan_file(&mut self, path_to_scan: impl AsRef<Path>) -> Result<()> {
+    pub async fn scan_file(&mut self, path_to_scan: impl AsRef<Path>) -> Result<ScanResult> {
         let reader = File::open(path_to_scan).await?;
         self.scan_reader(reader).await
     }
@@ -554,7 +576,6 @@ mod tests {
     use std::sync::Once;
     use tracing_test::traced_test;
 
-    // TODO start clamd
     const TCP_ADDRESS: &str = "127.0.0.1:3310";
     const UNIX_SOCKET_PATH: &str = "clamd.sock";
     static INIT: Once = Once::new();
@@ -685,11 +706,12 @@ NotifyClamd clamd.conf
             .await?;
 
         let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
-        let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
-        if let ClamdError::ScanError(s) = err {
-            assert_eq!(s, "Win.Test.EICAR_HDB-1 FOUND");
-        } else {
-            panic!("Scan error expected");
+        let res = clamd_client.scan_bytes(&eicar_bytes).await?;
+        match res {
+            ScanResult::Benign => panic!("Malignent scan result expected"),
+            ScanResult::Malignent { infection_types } => {
+                assert_eq!(infection_types, vec!["Win.Test.EICAR_HDB-1".to_owned()])
+            }
         }
         Ok(())
     }
@@ -739,11 +761,12 @@ NotifyClamd clamd.conf
             .await?;
         let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
 
-        let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
-        if let ClamdError::ScanError(s) = err {
-            assert_eq!(s, "Win.Test.EICAR_HDB-1 FOUND");
-        } else {
-            panic!("Scan error expected");
+        let res = clamd_client.scan_bytes(&eicar_bytes).await?;
+        match res {
+            ScanResult::Benign => panic!("Malignent scan result expected"),
+            ScanResult::Malignent { infection_types } => {
+                assert_eq!(infection_types, vec!["Win.Test.EICAR_HDB-1".to_owned()])
+            }
         }
         Ok(())
     }
@@ -776,13 +799,34 @@ NotifyClamd clamd.conf
         assert!(!stats.is_empty());
         let version = clamd_client.version().await?;
         assert!(!version.is_empty());
-        let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
-        if let ClamdError::ScanError(s) = err {
-            assert_eq!(s, "stream: Win.Test.EICAR_HDB-1 FOUND");
-        } else {
-            panic!("Scan error expected");
+        let res = clamd_client.scan_bytes(&eicar_bytes).await?;
+        match res {
+            ScanResult::Benign => panic!("Malignent scan result expected"),
+            ScanResult::Malignent { infection_types } => {
+                assert_eq!(infection_types, vec!["Win.Test.EICAR_HDB-1".to_owned()])
+            }
         }
         clamd_client.end_session().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn multi_virus() -> eyre::Result<()> {
+        setup_clamav();
+        let file_bytes = String::from("exec('aW1wb3J0IHNvY2tldCxvcwpzbz1zb2NrZXQuc29ja2V0KHNvY2tldC5BRl')\n\nimport base64,sys;exec(base64.b64decode({2:str,3:lambda b:bytes()}))");
+        let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
+        let res = clamd_client.scan_bytes(file_bytes.as_bytes()).await?;
+        match res {
+            ScanResult::Benign => panic!("Malignent scan result expected"),
+            ScanResult::Malignent { infection_types } => assert_eq!(
+                infection_types,
+                vec![
+                    "Legacy.Trojan.Agent-37027".to_owned(),
+                    "Legacy.Trojan.Agent-37025".to_owned()
+                ]
+            ),
+        }
         Ok(())
     }
 }
