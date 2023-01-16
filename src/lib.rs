@@ -324,7 +324,7 @@ impl ScanResult {
             Ok(ScanResult::Benign)
         } else {
             let mut infection_types: Vec<String> = Vec::new();
-            let results = out.split_terminator("\0");
+            let results = out.split_terminator('\0');
             for result in results {
                 let virus = result
                     .split_at(
