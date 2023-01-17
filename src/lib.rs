@@ -125,7 +125,7 @@ impl Encoder<ClamdRequestMessage> for ClamdZeroDelimitedCodec {
                 Ok(())
             }
             ClamdRequestMessage::AllMatchScan(path) => {
-                let path = path.to_str().ok_or_else(|| ClamdError::InvalidPath)?;
+                let path = path.to_str().ok_or(ClamdError::InvalidPath)?;
                 dst.reserve(14 + path.len());
                 dst.put(&b"zALLMATCHSCAN "[..]);
                 dst.put(path.as_bytes());
