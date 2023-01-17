@@ -52,6 +52,8 @@ pub enum ClamdError {
     /// [`ClamdError::scan_error`].
     #[error("clamd returned error on scan, possible virus: {0}")]
     ScanError(String),
+    #[error("unsupported feature: path must point to file")]
+    UnsupportedFeature,
 }
 
 impl ClamdError {

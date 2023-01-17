@@ -6,7 +6,7 @@
 //! this library does not depend on the tokio runtime itself. I have
 //! still to test this though.
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::SinkExt;
 use futures::StreamExt;
 use socket2::SockRef;
@@ -142,8 +142,9 @@ impl Decoder for ClamdZeroDelimitedCodec {
     type Error = ClamdError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
-        if src.contains(&0u8) {
-            let chunk = src.split();
+        if let Some(frame_end) = src.iter().position(|&x| x == 0u8) {
+            let chunk = src.split_to(frame_end).freeze();
+            src.advance(1);
             let s = String::from_utf8(chunk.into()).map_err(ClamdError::DecodingUtf8Error)?;
             Ok(Some(s))
         } else {
@@ -561,16 +562,18 @@ impl ClamdClient {
     }
 
     pub async fn all_match_scan(&mut self, path_to_scan: &impl AsRef<Path>) -> Result<ScanResult> {
-        let mut sock = self.connect().await?;
-        sock.send(ClamdRequestMessage::AllMatchScan(
-            path_to_scan.as_ref().to_path_buf(),
-        ))
-        .await?;
-        if let Some(s) = sock.next().await.transpose()? {
-            Ok(ScanResult::from_output(&s)?)
-        } else {
-            Err(ClamdError::NoResponse)
+        let path = path_to_scan.as_ref().to_path_buf();
+        if path.is_dir() {
+            return Err(ClamdError::UnsupportedFeature);
         }
+        let mut sock = self.connect().await?;
+        sock.send(ClamdRequestMessage::AllMatchScan(path)).await?;
+        let mut res = String::new();
+        while let Some(s) = sock.next().await.transpose()? {
+            res += &s;
+            res += "\0";
+        }
+        Ok(ScanResult::from_output(&res)?)
     }
 }
 
@@ -866,7 +869,11 @@ NotifyClamd clamd.conf
             ScanResult::Benign => panic!("Malignent scan result expected"),
             ScanResult::Malignent { infection_types } => assert_eq!(
                 infection_types,
-                vec!["Legacy.Trojan.Agent-37027".to_owned()]
+                vec![
+                    "Legacy.Trojan.Agent-37027".to_owned(),
+                    "Legacy.Trojan.Agent-37025".to_owned(),
+                    "Legacy.Trojan.Agent-37025".to_owned(),
+                ]
             ),
         }
         tokio::fs::remove_file(file_path).await?;
