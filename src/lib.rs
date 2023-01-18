@@ -573,7 +573,7 @@ impl ClamdClient {
             res += &s;
             res += "\0";
         }
-        Ok(ScanResult::from_output(&res)?)
+        ScanResult::from_output(&res)
     }
 }
 
