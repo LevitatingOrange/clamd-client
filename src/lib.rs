@@ -575,6 +575,7 @@ mod tests {
     use std::sync::Once;
     use tracing_test::traced_test;
 
+    const CLAMAV_VERSION: &str = "1.0.0";
     const TCP_ADDRESS: &str = "127.0.0.1:3310";
     const UNIX_SOCKET_PATH: &str = "clamd.sock";
     static INIT: Once = Once::new();
@@ -635,7 +636,7 @@ NotifyClamd clamd.conf
                 Ok(_) => (),
                 Err(_) => {
                     Command::new("wget")
-                        .arg("https://www.clamav.net/downloads/production/clamav-1.0.0.linux.x86_64.deb")
+                        .arg(format!("https://www.clamav.net/downloads/production/clamav-{}.linux.x86_64.deb", CLAMAV_VERSION))
                         .status()
                         .unwrap();
                     Command::new("sudo")
