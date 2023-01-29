@@ -618,7 +618,38 @@ NotifyClamd clamd.conf
     #[cfg(target_os = "macos")]
     fn setup_clamav() {
         INIT.call_once(|| {
-            todo!();
+            generate_config_files();
+            let whoami = Command::new("whoami").output().unwrap();
+            let user = String::from_utf8(whoami.stdout).unwrap();
+            match Command::new("/usr/local/clamav/bin/freshclam")
+                .arg("-u")
+                .arg(user.trim_end())
+                .arg("--config-file=freshclam.conf")
+                .status() {
+                Ok(_) => (),
+                Err(_) => {
+                    Command::new("wget")
+                        .arg(format!("https://www.clamav.net/downloads/production/clamav-{}.macos.universal.pkg", CLAMAV_VERSION))
+                        .status()
+                        .unwrap();
+                    Command::new("sudo")
+                        .arg("installer")
+                        .arg("-pkg")
+                        .arg("clamav-1.0.0.macos.universal.pkg")
+                        .arg("-target")
+                        .arg("/")
+                        .status()
+                        .unwrap();
+                    Command::new("sudo")
+                        .arg("/usr/local/clamav/bin/freshclam")
+                        .arg("-u")
+                        .arg(user.trim_end())
+                        .arg("--config-file=freshclam.conf")
+                        .status()
+                        .unwrap();
+                }
+            };
+            Command::new("/usr/local/clamav/sbin/clamd").arg("-c").arg("clamd.conf").status().unwrap();
         });
     }
 
