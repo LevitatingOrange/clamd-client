@@ -652,11 +652,6 @@ NotifyClamd clamd.conf
                         .arg("--config-file=freshclam.conf")
                         .status()
                         .unwrap();
-                    Command::new("clamd")
-                        .arg("-c")
-                        .arg("clamd.conf")
-                        .status()
-                        .unwrap();
                 }
             };
             Command::new("clamd").arg("-c").arg("clamd.conf").status().unwrap();
