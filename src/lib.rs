@@ -718,7 +718,8 @@ NotifyClamd clamd.conf
         let random_bytes: Vec<u8> = (0..NUM_BYTES).map(|_| rand::random::<u8>()).collect();
 
         let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
-        clamd_client.scan_bytes(&random_bytes).await?;
+        let result = clamd_client.scan_bytes(&random_bytes).await?;
+        assert!(matches!(result, ScanResult::Benign));
         Ok(())
     }
 
