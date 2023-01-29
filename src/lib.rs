@@ -319,8 +319,7 @@ pub enum ScanResult {
 
 impl ScanResult {
     pub(crate) fn from_output(out: &str) -> Result<Self> {
-        println!("{}", out);
-        if out.contains("OK") {
+        if out.ends_with("OK") {
             Ok(ScanResult::Benign)
         } else {
             let mut infection_types: Vec<String> = Vec::new();
