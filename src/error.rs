@@ -3,8 +3,6 @@
 use crate::ClamdClient;
 use std::num::TryFromIntError;
 
-use tracing::trace;
-
 pub type Result<T> = std::result::Result<T, ClamdError>;
 
 /// Errors that can occur when using [`ClamdClient`].
