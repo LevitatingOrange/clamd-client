@@ -314,24 +314,27 @@ pub enum ScanResult {
 
 impl ScanResult {
     pub(crate) fn from_output(out: &str) -> Result<Self> {
-        if out.ends_with("OK") {
+        let mut infection_types: Vec<String> = Vec::new();
+        let results = out.split_terminator('\0');
+        for raw_result in results {
+            let result = raw_result
+                .split_at(
+                    raw_result
+                        .rfind(':')
+                        .ok_or_else(|| ClamdError::IncompleteResponse(out.to_string()))?
+                        + 1,
+                )
+                .1
+                .trim();
+            if result.ends_with("OK") {
+                continue;
+            } else {
+                infection_types.push(result.replace(" FOUND", ""));
+            }
+        }
+        if infection_types.len() == 0 {
             Ok(ScanResult::Benign)
         } else {
-            let mut infection_types: Vec<String> = Vec::new();
-            let results = out.split_terminator('\0');
-            for result in results {
-                let virus = result
-                    .split_at(
-                        result
-                            .rfind(':')
-                            .ok_or_else(|| ClamdError::IncompleteResponse(out.to_string()))?
-                            + 1,
-                    )
-                    .1
-                    .trim()
-                    .replace(" FOUND", "");
-                infection_types.push(virus);
-            }
             Ok(ScanResult::Malignent { infection_types })
         }
     }
@@ -791,7 +794,8 @@ NotifyClamd clamd.conf
         let random_bytes: Vec<u8> = (0..NUM_BYTES).map(|_| rand::random::<u8>()).collect();
         let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
 
-        clamd_client.scan_bytes(&random_bytes).await?;
+        let result = clamd_client.scan_bytes(&random_bytes).await?;
+        assert!(matches!(result, ScanResult::Benign));
         Ok(())
     }
 
@@ -876,6 +880,22 @@ NotifyClamd clamd.conf
                 ]
             ),
         }
+        tokio::fs::remove_file(file_path).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn benign_file_scan() -> eyre::Result<()> {
+        setup_clamav();
+        let current_dir = std::env::current_dir()?;
+        let file_path = current_dir.join("safe.py");
+        let file_content = String::from("import somemodule; print(f'{somemodule.somemethod()')");
+        let mut file = File::create(&file_path).await?;
+        file.write_all(file_content.as_bytes()).await?;
+        let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
+        let res = clamd_client.all_match_scan(&file_path).await?;
+        assert!(matches!(res, ScanResult::Benign));
         tokio::fs::remove_file(file_path).await?;
         Ok(())
     }
