@@ -23,7 +23,7 @@ async fn main() -> eyre::Result<()> {
     let result = clamd_client.scan_bytes(&eicar_bytes).await?;
     match result {
         ScanResult::Malignent { infection_types } => {
-            tracing::info!("clamd found a virus(es):\n{}", infection_types.join("\n"))
+            tracing::debug!("clamd found a virus(es):\n{}", infection_types.join("\n"))
         }
         _ => (),
     };
