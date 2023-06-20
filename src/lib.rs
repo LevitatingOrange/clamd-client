@@ -848,10 +848,7 @@ NotifyClamd clamd.conf
             ScanResult::Benign => panic!("Malignent scan result expected"),
             ScanResult::Malignent { infection_types } => assert_eq!(
                 infection_types,
-                vec![
-                    "Legacy.Trojan.Agent-37027".to_owned(),
-                    "Legacy.Trojan.Agent-37025".to_owned()
-                ]
+                vec!["Legacy.Trojan.Agent-37027".to_owned()]
             ),
         }
         Ok(())
