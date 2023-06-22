@@ -332,7 +332,7 @@ impl ScanResult {
                 infection_types.push(result.replace(" FOUND", ""));
             }
         }
-        if infection_types.len() == 0 {
+        if infection_types.is_empty() {
             Ok(ScanResult::Benign)
         } else {
             Ok(ScanResult::Malignent { infection_types })
