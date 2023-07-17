@@ -41,8 +41,8 @@ fn parse_entity(input: &str) -> IResult<&str, &str> {
 }
 
 fn parse_session_id(input: &str) -> IResult<&str, u64> {
-    map_res(terminated(take_till(|c| c == ':'), char(':')), |s| {
-        u64::from_str_radix(s, 10)
+    map_res(terminated(take_till(|c| c == ':'), char(':')), |s: &str| {
+        s.parse()
     })(input)
 }
 

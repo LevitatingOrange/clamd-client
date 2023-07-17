@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use clamd_client::{ClamdClientBuilder, ScanCondition, ScanResult};
+use clamd_client::{ClamdClientBuilder, ScanCondition};
 use eyre::Result;
 use tracing::debug;
 use tracing_subscriber;
