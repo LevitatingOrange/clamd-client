@@ -1,6 +1,6 @@
-use clamd_client::ClamdClientBuilder;
+use clamd_client::{ClamdClientBuilder, ScanResult};
 use eyre::Result;
-use tracing::info;
+use tracing::debug;
 use tracing_subscriber;
 
 const NUM_BYTES: usize = 1024 * 1024;
@@ -12,30 +12,34 @@ async fn main() -> Result<()> {
     let address = "127.0.0.1:3310";
     let mut clamd_client = ClamdClientBuilder::tcp_socket(address)?.build();
     clamd_client.ping().await?;
-    info!("Ping worked!");
+    debug!("Ping worked!");
     clamd_client.reload().await?;
-    info!("Reload worked!");
+    debug!("Reload worked!");
     let version = clamd_client.version().await?;
-    info!("Clamd Version: {}", version);
+    debug!("Clamd Version: {}", version);
     let stats = clamd_client.stats().await?;
-    info!("Got clamd stats:");
+    debug!("Got clamd stats:");
     for stat in stats.lines() {
-        info!("    {}", stat);
+        debug!("    {}", stat);
     }
 
     let random_bytes: Vec<u8> = (0..NUM_BYTES).map(|_| rand::random::<u8>()).collect();
 
     clamd_client.scan_bytes(&random_bytes).await?;
-    info!("Clamd scan found no virus in the random bytes");
+    debug!("Clamd scan found no virus in the random bytes");
 
     let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
         .await?
         .bytes()
         .await?;
 
-    let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
-    let msg = err.scan_error().unwrap();
-    info!("Eicar scan returned that its a virus: {}", msg);
+    let result = clamd_client.scan_bytes(&eicar_bytes).await?;
+    match result {
+        ScanResult::Malignent { infection_types } => {
+            debug!("clamd found a virus(es):\n{}", infection_types.join("\n"))
+        }
+        _ => (),
+    };
 
     Ok(())
 }

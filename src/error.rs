@@ -58,7 +58,7 @@ impl ClamdError {
     /// # Example
     /// ```rust
     /// # use std::net::SocketAddr;
-    /// # use clamd_client::ClamdClientBuilder;
+    /// # use clamd_client::{ClamdClientBuilder, ScanResult};
     /// # use eyre::Result;
     /// # async fn doc() -> eyre::Result<()> {
     /// let address = "127.0.0.1:3310".parse::<SocketAddr>()?;
@@ -70,9 +70,13 @@ impl ClamdError {
     ///   .bytes()
     ///   .await?;
     ///
-    /// let err = clamd_client.scan_bytes(&eicar_bytes).await.unwrap_err();
-    /// let msg = err.scan_error().unwrap();
-    /// println!("Eicar scan returned that its a virus: {}", msg);
+    /// let result = clamd_client.scan_bytes(&eicar_bytes).await?;
+    /// match result {
+    ///     ScanResult::Malignent { infection_types } => {
+    ///         tracing::info!("clamd found a virus(es):\n{}", infection_types.join("\n"))
+    ///     }
+    ///     _ => (),
+    /// };
     /// # Ok(())
     /// # }
     /// ```
