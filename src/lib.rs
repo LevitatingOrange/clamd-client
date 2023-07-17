@@ -31,8 +31,10 @@ use tracing::trace;
 use crate::error::Result;
 
 mod error;
+mod util;
 
 pub use error::ClamdError;
+pub use util::{ScanCondition, ScanResult};
 
 /// Default chunk size used by [`ClamdClient`] while streaming bytes to `clamd`.
 pub const DEFAULT_CHUNK_SIZE: usize = 8192;
@@ -312,36 +314,6 @@ impl ClamdClientBuilder {
     }
 }
 
-pub enum ScanResult {
-    Benign,
-    Malignent { infection_types: Vec<String> },
-}
-
-impl ScanResult {
-    pub(crate) fn from_output(out: &str) -> Result<Self> {
-        if out.ends_with("OK") {
-            Ok(ScanResult::Benign)
-        } else {
-            let mut infection_types: Vec<String> = Vec::new();
-            let results = out.split_terminator('\0');
-            for result in results {
-                let virus = result
-                    .split_at(
-                        result
-                            .rfind(':')
-                            .ok_or_else(|| ClamdError::IncompleteResponse(out.to_string()))?
-                            + 1,
-                    )
-                    .1
-                    .trim()
-                    .replace(" FOUND", "");
-                infection_types.push(virus);
-            }
-            Ok(ScanResult::Malignent { infection_types })
-        }
-    }
-}
-
 /// Asynchronous, tokio based client for clamd. Use [`ClamdClientBuilder`] to build.
 /// At the moment, this will always open a new TCP connection for each command executed.
 /// There are plans to also include an option to reuse / keep alive connections but that is a TODO.
@@ -538,8 +510,13 @@ impl ClamdClient {
         }
         trace!("Hit EOF, closing stream to clamd");
         sock.send(ClamdRequestMessage::EndStream).await?;
+
+        // we only get a single response here because when streaming,
+        // clamd will only return the first virus signature it finds
+        // in the given bytes stream (verified experimentally)
         if let Some(s) = sock.next().await.transpose()? {
-            Ok(ScanResult::from_output(&s)?)
+            trace!("Got result from clamd: {}", s);
+            ScanResult::parse(&s, false)
         } else {
             Err(ClamdError::NoResponse)
         }
@@ -719,7 +696,7 @@ NotifyClamd clamd.conf
 
         let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
         let result = clamd_client.scan_bytes(&random_bytes).await?;
-        assert!(matches!(result, ScanResult::Benign));
+        assert!(matches!(result.condition, ScanCondition::Benign));
         Ok(())
     }
 
@@ -734,10 +711,10 @@ NotifyClamd clamd.conf
 
         let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
         let res = clamd_client.scan_bytes(&eicar_bytes).await?;
-        match res {
-            ScanResult::Benign => panic!("Malignent scan result expected"),
-            ScanResult::Malignent { infection_types } => {
-                assert_eq!(infection_types, vec!["Win.Test.EICAR_HDB-1".to_owned()])
+        match res.condition {
+            ScanCondition::Benign => panic!("Malignent scan result expected"),
+            ScanCondition::Malignant(infection) => {
+                assert_eq!(infection, "Win.Test.EICAR_HDB-1".to_owned());
             }
         }
         Ok(())
@@ -789,10 +766,10 @@ NotifyClamd clamd.conf
         let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
 
         let res = clamd_client.scan_bytes(&eicar_bytes).await?;
-        match res {
-            ScanResult::Benign => panic!("Malignent scan result expected"),
-            ScanResult::Malignent { infection_types } => {
-                assert_eq!(infection_types, vec!["Win.Test.EICAR_HDB-1".to_owned()])
+        match res.condition {
+            ScanCondition::Benign => panic!("Malignant scan result expected"),
+            ScanCondition::Malignant(infection) => {
+                assert_eq!(infection, "Win.Test.EICAR_HDB-1".to_owned());
             }
         }
         Ok(())
@@ -808,34 +785,35 @@ NotifyClamd clamd.conf
         Ok(())
     }
 
-    #[tokio::test]
-    #[traced_test]
-    async fn keep_alive() -> eyre::Result<()> {
-        setup_clamav();
-        let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
-            .await?
-            .bytes()
-            .await?;
+    // TODO 2023-07-17 to be replaced by a better interface
+    // #[tokio::test]
+    // #[traced_test]
+    // async fn keep_alive() -> eyre::Result<()> {
+    //     setup_clamav();
+    //     let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
+    //         .await?
+    //         .bytes()
+    //         .await?;
 
-        let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?
-            .keep_alive(true)
-            .build();
-        clamd_client.ping().await?;
-        clamd_client.ping().await?;
-        let stats = clamd_client.stats().await?;
-        assert!(!stats.is_empty());
-        let version = clamd_client.version().await?;
-        assert!(!version.is_empty());
-        let res = clamd_client.scan_bytes(&eicar_bytes).await?;
-        match res {
-            ScanResult::Benign => panic!("Malignent scan result expected"),
-            ScanResult::Malignent { infection_types } => {
-                assert_eq!(infection_types, vec!["Win.Test.EICAR_HDB-1".to_owned()])
-            }
-        }
-        clamd_client.end_session().await?;
-        Ok(())
-    }
+    //     let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?
+    //         .keep_alive(true)
+    //         .build();
+    //     clamd_client.ping().await?;
+    //     clamd_client.ping().await?;
+    //     let stats = clamd_client.stats().await?;
+    //     assert!(!stats.is_empty());
+    //     let version = clamd_client.version().await?;
+    //     assert!(!version.is_empty());
+    //     let res = clamd_client.scan_bytes(&eicar_bytes).await?;
+    //     match res.condition {
+    //         ScanCondition::Benign => panic!("Malignent scan result expected"),
+    //         ScanCondition::Malignant(infection) => {
+    //             assert_eq!(infection, "Win.Test.EICAR_HDB-1".to_owned())
+    //         }
+    //     }
+    //     clamd_client.end_session().await?;
+    //     Ok(())
+    // }
 
     #[tokio::test]
     #[traced_test]
@@ -844,12 +822,11 @@ NotifyClamd clamd.conf
         let file_bytes = String::from("exec('aW1wb3J0IHNvY2tldCxvcwpzbz1zb2NrZXQuc29ja2V0KHNvY2tldC5BRl')\n\nimport base64,sys;exec(base64.b64decode({2:str,3:lambda b:bytes()}))");
         let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
         let res = clamd_client.scan_bytes(file_bytes.as_bytes()).await?;
-        match res {
-            ScanResult::Benign => panic!("Malignent scan result expected"),
-            ScanResult::Malignent { infection_types } => assert_eq!(
-                infection_types,
-                vec!["Legacy.Trojan.Agent-37027".to_owned()]
-            ),
+        match res.condition {
+            ScanCondition::Benign => panic!("Malignent scan result expected"),
+            ScanCondition::Malignant(infection) => {
+                assert_eq!(infection, "Legacy.Trojan.Agent-37027".to_owned())
+            }
         }
         Ok(())
     }

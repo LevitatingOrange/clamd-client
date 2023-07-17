@@ -7,7 +7,7 @@ new socket for each command. Work in progress.
 See also [`examples/simple.rs`](https://github.com/LevitatingOrange/clamd-client/blob/main/examples/simple.rs).
 There should be a running clamd instance on your machine (see [Notes](#running-clamd)).
 ```rust
-use clamd_client::{ClamdClientBuilder, ScanResult};
+use clamd_client::{ClamdClientBuilder, ScanCondition};
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -21,9 +21,9 @@ async fn main() -> eyre::Result<()> {
         .await?;
 
     let result = clamd_client.scan_bytes(&eicar_bytes).await?;
-    match result {
-        ScanResult::Malignent { infection_types } => {
-            tracing::debug!("clamd found a virus(es):\n{}", infection_types.join("\n"))
+    match result.condition {
+        ScanCondition::Malignant(infection) => {
+            tracing::debug!("clamd found a virus:\n{}", infection)
         }
         _ => (),
     };

@@ -1,4 +1,5 @@
-use clamd_client::{ClamdClientBuilder, ScanResult};
+use bytes::BytesMut;
+use clamd_client::{ClamdClientBuilder, ScanCondition};
 use eyre::Result;
 use tracing::debug;
 use tracing_subscriber;
@@ -28,15 +29,20 @@ async fn main() -> Result<()> {
     clamd_client.scan_bytes(&random_bytes).await?;
     debug!("Clamd scan found no virus in the random bytes");
 
+    let mut bytes = BytesMut::new();
+
     let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
         .await?
         .bytes()
         .await?;
 
-    let result = clamd_client.scan_bytes(&eicar_bytes).await?;
-    match result {
-        ScanResult::Malignent { infection_types } => {
-            debug!("clamd found a virus(es):\n{}", infection_types.join("\n"))
+    bytes.extend(eicar_bytes);
+    bytes.extend( "exec('aW1wb3J0IHNvY2tldCxvcwpzbz1zb2NrZXQuc29ja2V0KHNvY2tldC5BRl')\n\nimport base64,sys;exec(base64.b64decode({2:str,3:lambda b:bytes()}))".as_bytes());
+
+    let result = clamd_client.scan_bytes(&bytes).await?;
+    match result.condition {
+        ScanCondition::Malignant(infection) => {
+            debug!("clamd found a virus:\n{}", infection)
         }
         _ => (),
     };
