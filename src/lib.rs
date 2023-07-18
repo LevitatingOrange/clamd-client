@@ -20,9 +20,8 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
-use tokio::sync::MappedMutexGuard;
 use tokio::sync::Mutex;
-use tokio::sync::MutexGuard;
+use tokio::sync::OwnedMutexGuard;
 use tokio_util::codec::Decoder;
 use tokio_util::codec::Encoder;
 use tokio_util::codec::Framed;
@@ -48,16 +47,15 @@ enum ClamdRequestMessage {
     EndStream,
     StartSession,
     EndSession,
-    // ContScan(PathBuf),
+    AllMatchScan(PathBuf),
+    MultiScan(PathBuf),
 }
 
-struct ClamdZeroDelimitedCodec {
-    next_index: usize,
-}
+struct ClamdZeroDelimitedCodec;
 
 impl ClamdZeroDelimitedCodec {
     fn new() -> Self {
-        Self { next_index: 0 }
+        Self
     }
 }
 
@@ -125,15 +123,23 @@ impl Encoder<ClamdRequestMessage> for ClamdZeroDelimitedCodec {
                 dst.put(&b"zEND"[..]);
                 dst.put_u8(0);
                 Ok(())
-            } // ClamdRequestMessage::AllMatch(path) => {
-              //     // TODO: safety
-              //     let path = path.to_str().unwrap();
-              //     dst.reserve(10 + path.len());
-              //     dst.put(&b"zALLMATCH "[..]);
-              //     dst.put(path.as_bytes());
-              //     dst.put_u8(0);
-              //     Ok(())
-              // }
+            }
+            ClamdRequestMessage::AllMatchScan(path) => {
+                let path = path.to_str().ok_or(ClamdError::InvalidPath)?;
+                dst.reserve(14 + path.len());
+                dst.put(&b"zALLMATCHSCAN "[..]);
+                dst.put(path.as_bytes());
+                dst.put_u8(0);
+                Ok(())
+            }
+            ClamdRequestMessage::MultiScan(path) => {
+                let path = path.to_str().ok_or(ClamdError::InvalidPath)?;
+                dst.reserve(11 + path.len());
+                dst.put(&b"zMULTISCAN "[..]);
+                dst.put(path.as_bytes());
+                dst.put_u8(0);
+                Ok(())
+            }
         }
     }
 }
@@ -144,20 +150,18 @@ impl Decoder for ClamdZeroDelimitedCodec {
     type Error = ClamdError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
-        if let Some(rel_split_pos) = src[self.next_index..].iter().position(|&x| x == 0u8) {
-            let split_pos = rel_split_pos + self.next_index;
-            let chunk = src.split_to(split_pos).freeze();
+        if let Some(frame_end) = src.iter().position(|&x| x == 0u8) {
+            let chunk = src.split_to(frame_end).freeze();
             src.advance(1);
-            self.next_index = 0;
             let s = String::from_utf8(chunk.into()).map_err(ClamdError::DecodingUtf8Error)?;
             Ok(Some(s))
         } else {
-            self.next_index = src.len();
             Ok(None)
         }
     }
 }
 
+#[derive(Clone)]
 enum SocketType {
     Tcp(SocketAddr),
     #[cfg(target_family = "unix")]
@@ -299,15 +303,13 @@ impl ClamdClientBuilder {
     /// Create [`ClamdClient`] with provided configuration.
     pub fn build(&self) -> ClamdClient {
         ClamdClient {
-            shared: Arc::new(Shared {
-                chunk_size: self.chunk_size,
-                connection_type: self.connection_type,
-                socket_type: match &self.socket_type {
-                    SocketTypeBuilder::Tcp(t) => SocketType::Tcp(t.to_owned()),
-                    SocketTypeBuilder::Unix(u) => SocketType::Unix(u.to_owned()),
-                },
-                state: Mutex::new(None),
-            }),
+            chunk_size: self.chunk_size,
+            connection_type: self.connection_type,
+            socket_type: match &self.socket_type {
+                SocketTypeBuilder::Tcp(t) => SocketType::Tcp(t.to_owned()),
+                SocketTypeBuilder::Unix(u) => SocketType::Unix(u.to_owned()),
+            },
+            state: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -319,24 +321,27 @@ pub enum ScanResult {
 
 impl ScanResult {
     pub(crate) fn from_output(out: &str) -> Result<Self> {
-        if out.ends_with("OK") {
+        let mut infection_types: Vec<String> = Vec::new();
+        let results = out.split_terminator('\0');
+        for raw_result in results {
+            let result = raw_result
+                .split_at(
+                    raw_result
+                        .rfind(':')
+                        .ok_or_else(|| ClamdError::IncompleteResponse(out.to_string()))?
+                        + 1,
+                )
+                .1
+                .trim();
+            if result.ends_with("OK") {
+                continue;
+            } else {
+                infection_types.push(result.replace(" FOUND", ""));
+            }
+        }
+        if infection_types.is_empty() {
             Ok(ScanResult::Benign)
         } else {
-            let mut infection_types: Vec<String> = Vec::new();
-            let results = out.split_terminator('\0');
-            for result in results {
-                let virus = result
-                    .split_at(
-                        result
-                            .rfind(':')
-                            .ok_or_else(|| ClamdError::IncompleteResponse(out.to_string()))?
-                            + 1,
-                    )
-                    .1
-                    .trim()
-                    .replace(" FOUND", "");
-                infection_types.push(virus);
-            }
             Ok(ScanResult::Malignent { infection_types })
         }
     }
@@ -362,48 +367,57 @@ impl ScanResult {
 /// ```
 #[derive(Clone)]
 pub struct ClamdClient {
-    shared: Arc<Shared>,
-}
-
-struct Shared {
     chunk_size: usize,
     connection_type: ConnectionType,
     socket_type: SocketType,
-    state: Mutex<ConnectedSocket>,
+    state: Arc<Mutex<Option<ConnectedSocket>>>,
 }
 
-type ConnectedSocket = Option<Framed<SocketWrapper, ClamdZeroDelimitedCodec>>;
+type ConnectedSocket = Framed<SocketWrapper, ClamdZeroDelimitedCodec>;
+
+type GuardedFrame = OwnedMutexGuard<Option<ConnectedSocket>>;
+
+enum WrappedFramed {
+    Raw(ConnectedSocket),
+    Mutexed(GuardedFrame),
+}
+
+impl WrappedFramed {
+    fn get_socket(&mut self) -> &mut ConnectedSocket {
+        match self {
+            WrappedFramed::Raw(f) => f,
+            // SAFETY: connection should always be initialised before being stored in `WrappedFramed`
+            WrappedFramed::Mutexed(g) => g.as_mut().expect("connection to be initialised"),
+        }
+    }
+}
 
 impl ClamdClient {
-    async fn connect(
-        &mut self,
-    ) -> Result<MappedMutexGuard<'_, Framed<SocketWrapper, ClamdZeroDelimitedCodec>>> {
+    async fn connect(&mut self) -> Result<WrappedFramed> {
         let codec = ClamdZeroDelimitedCodec::new();
-        let mut guard = MutexGuard::map(self.shared.state.lock().await, |s| s);
-        match &self.shared.connection_type {
-            ConnectionType::Oneshot => {
-                *guard = match &self.shared.socket_type {
-                    SocketType::Tcp(address) => Some(Framed::new(
-                        SocketWrapper::Tcp(
-                            TcpStream::connect(address)
-                                .await
-                                .map_err(ClamdError::ConnectError)?,
-                        ),
-                        codec,
-                    )),
-                    SocketType::Unix(path) => Some(Framed::new(
-                        SocketWrapper::Unix(
-                            UnixStream::connect(path)
-                                .await
-                                .map_err(ClamdError::ConnectError)?,
-                        ),
-                        codec,
-                    )),
-                }
-            }
+        match &self.connection_type {
+            ConnectionType::Oneshot => match &self.socket_type {
+                SocketType::Tcp(address) => Ok(WrappedFramed::Raw(Framed::new(
+                    SocketWrapper::Tcp(
+                        TcpStream::connect(address)
+                            .await
+                            .map_err(ClamdError::ConnectError)?,
+                    ),
+                    codec,
+                ))),
+                SocketType::Unix(path) => Ok(WrappedFramed::Raw(Framed::new(
+                    SocketWrapper::Unix(
+                        UnixStream::connect(path)
+                            .await
+                            .map_err(ClamdError::ConnectError)?,
+                    ),
+                    codec,
+                ))),
+            },
             ConnectionType::KeepAlive => {
+                let mut guard = self.state.clone().lock_owned().await;
                 if guard.is_none() {
-                    *guard = match &self.shared.socket_type {
+                    *guard = match &self.socket_type {
                         SocketType::Tcp(address) => {
                             let stream = TcpStream::connect(address).await?;
                             let socket_ref = SockRef::from(&stream);
@@ -422,22 +436,33 @@ impl ClamdClient {
                         }
                     }
                 }
+                Ok(WrappedFramed::Mutexed(guard))
             }
-        };
-        drop(guard);
-        Ok(MutexGuard::map(self.shared.state.lock().await, |s| {
-            s.as_mut().unwrap()
-        }))
+        }
     }
 
+    async fn close_connection(&mut self) -> Result<()> {
+        match &self.connection_type {
+            ConnectionType::Oneshot => Ok(()),
+            ConnectionType::KeepAlive => {
+                let mut guard = self.state.clone().lock_owned().await;
+                *guard = None;
+                Ok(())
+            }
+        }
+    }
+}
+
+impl ClamdClient {
     /// Ping clamd. If it responds normally (with `PONG`) this function returns `Ok(())`, otherwise
     /// returns with error.
     pub async fn ping(&mut self) -> Result<()> {
-        let mut sock = self.connect().await?;
+        let mut framed = self.connect().await?;
+        let sock = framed.get_socket();
         sock.send(ClamdRequestMessage::Ping).await?;
         trace!("Sent ping to clamd");
         if let Some(s) = sock.next().await.transpose()? {
-            if s.ends_with("PONG") {
+            if s.contains("PONG") {
                 trace!("Received pong from clamd");
                 Ok(())
             } else {
@@ -450,12 +475,13 @@ impl ClamdClient {
 
     /// Get `clamd` version string.
     pub async fn version(&mut self) -> Result<String> {
-        let mut sock = self.connect().await?;
+        let mut framed = self.connect().await?;
+        let sock = framed.get_socket();
         sock.send(ClamdRequestMessage::Version).await?;
         trace!("Sent version request to clamd");
 
         if let Some(s) = sock.next().await.transpose()? {
-            trace!("Received version from clamd");
+            trace!("Received version from clamd: {}", s.trim());
             Ok(s)
         } else {
             Err(ClamdError::NoResponse)
@@ -464,15 +490,14 @@ impl ClamdClient {
 
     /// Reload `clamd`.
     pub async fn reload(&mut self) -> Result<()> {
-        let mut sock = self.connect().await?;
+        let mut framed = self.connect().await?;
+        let sock = framed.get_socket();
         sock.send(ClamdRequestMessage::Reload).await?;
         trace!("Sent reload request to clamd");
         if let Some(s) = sock.next().await.transpose()? {
-            if s == "RELOADING" {
+            if s.contains("RELOADING") {
                 trace!("Clamd started reload");
-                // make sure old tcp connection is closed
-                // connection will be re-created on next command
-                drop(sock);
+                self.close_connection().await?;
                 trace!("Clamd finished reload");
                 Ok(())
             } else {
@@ -485,12 +510,13 @@ impl ClamdClient {
 
     /// Get `clamd` stats.
     pub async fn stats(&mut self) -> Result<String> {
-        let mut sock = self.connect().await?;
+        let mut framed = self.connect().await?;
+        let sock = framed.get_socket();
         sock.send(ClamdRequestMessage::Stats).await?;
         trace!("Sent stats request to clamd");
 
         if let Some(s) = sock.next().await.transpose()? {
-            if s.ends_with("END") {
+            if s.contains("END") {
                 trace!("Got stats from clamd");
                 Ok(s)
             } else {
@@ -503,7 +529,8 @@ impl ClamdClient {
 
     /// Shutdown clamd. Careful: There is no way to start clamd again from this library.
     pub async fn shutdown(mut self) -> Result<()> {
-        let mut sock = self.connect().await?;
+        let mut framed = self.connect().await?;
+        let sock = framed.get_socket();
         trace!("Sent shutdown request to clamd");
         sock.send(ClamdRequestMessage::Shutdown).await?;
         Ok(())
@@ -525,8 +552,9 @@ impl ClamdClient {
         &mut self,
         mut to_scan: R,
     ) -> Result<ScanResult> {
-        let mut buf = BytesMut::with_capacity(self.shared.chunk_size);
-        let mut sock = self.connect().await?;
+        let mut buf = BytesMut::with_capacity(self.chunk_size);
+        let mut framed = self.connect().await?;
+        let sock = framed.get_socket();
 
         sock.send(ClamdRequestMessage::StartStream).await?;
         trace!("Starting bytes stream to clamd");
@@ -561,18 +589,50 @@ impl ClamdClient {
     }
 
     pub async fn end_session(&mut self) -> Result<()> {
-        let mut sock = self.connect().await?;
+        let mut framed = self.connect().await?;
+        let sock = framed.get_socket();
         sock.send(ClamdRequestMessage::EndSession).await?;
         Ok(())
+    }
+
+    pub async fn all_match_scan(&mut self, path_to_scan: &impl AsRef<Path>) -> Result<ScanResult> {
+        let path = path_to_scan.as_ref().to_path_buf();
+        if path.is_dir() {
+            return Err(ClamdError::UnsupportedFeature);
+        }
+        let mut framed = self.connect().await?;
+        let sock = framed.get_socket();
+        sock.send(ClamdRequestMessage::AllMatchScan(path)).await?;
+        let mut res = String::new();
+        while let Some(s) = sock.next().await.transpose()? {
+            res += &s;
+            res += "\0";
+        }
+        ScanResult::from_output(&res)
+    }
+
+    pub async fn multi_scan(&mut self, path_to_scan: &impl AsRef<Path>) -> Result<ScanResult> {
+        let path = path_to_scan.as_ref().to_path_buf();
+        if path.is_dir() {
+            return Err(ClamdError::UnsupportedFeature);
+        }
+        let mut framed = self.connect().await?;
+        let sock = framed.get_socket();
+        sock.send(ClamdRequestMessage::MultiScan(path)).await?;
+        if let Some(res) = sock.next().await.transpose()? {
+            Ok(ScanResult::from_output(&res)?)
+        } else {
+            Err(ClamdError::NoResponse)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use std::process::Command;
     use std::sync::Once;
+    use tokio::io::AsyncWriteExt;
     use tracing_test::traced_test;
 
     const CLAMAV_VERSION: &str = "1.0.0";
@@ -617,6 +677,8 @@ NotifyClamd clamd.conf
 
     #[cfg(target_os = "macos")]
     fn setup_clamav() {
+        use std::process::Stdio;
+
         INIT.call_once(|| {
             generate_config_files();
             let whoami = Command::new("whoami").output().unwrap();
@@ -649,12 +711,20 @@ NotifyClamd clamd.conf
                         .unwrap();
                 }
             };
-            Command::new("/usr/local/clamav/sbin/clamd").arg("-c").arg("clamd.conf").status().unwrap();
+            let ping = Command::new("printf").arg("zPING\\0").stdout(Stdio::piped()).spawn().unwrap();
+            let pong = Command::new("nc").arg("-U").arg("clamd.sock").stdin(ping.stdout.unwrap()).output().unwrap();
+            if String::from_utf8(pong.stdout).unwrap() != "PONG\0" {
+                let path = std::env::current_dir().unwrap();
+                let current_dir = path.to_str().unwrap();
+                Command::new("/usr/local/clamav/sbin/clamd").arg("-c").arg("clamd.conf").arg("-l").arg("clamd.log").status().unwrap();
+            }
         });
     }
 
     #[cfg(target_os = "linux")]
     fn setup_clamav() {
+        use std::process::Stdio;
+
         INIT.call_once(|| {
             generate_config_files();
             let whoami = Command::new("whoami").output().unwrap();
@@ -685,7 +755,13 @@ NotifyClamd clamd.conf
                         .unwrap();
                 }
             };
-            Command::new("clamd").arg("-c").arg("clamd.conf").status().unwrap();
+            let ping = Command::new("printf").arg("zPING\\0").stdout(Stdio::piped()).spawn().unwrap();
+            let pong = Command::new("nc").arg("-U").arg("clamd.sock").stdin(ping.stdout.unwrap()).output().unwrap();
+            if String::from_utf8(pong.stdout).unwrap() != "PONG\0" {
+                let path = std::env::current_dir().unwrap();
+                let current_dir = path.to_str().unwrap();
+                Command::new("clamd").arg("-c").arg("clamd.conf").arg("-l").arg(format!("{}/clamd.log", current_dir)).status().unwrap();
+            }
         })
     }
 
@@ -774,7 +850,8 @@ NotifyClamd clamd.conf
         let random_bytes: Vec<u8> = (0..NUM_BYTES).map(|_| rand::random::<u8>()).collect();
         let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
 
-        clamd_client.scan_bytes(&random_bytes).await?;
+        let result = clamd_client.scan_bytes(&random_bytes).await?;
+        assert!(matches!(result, ScanResult::Benign));
         Ok(())
     }
 
@@ -841,16 +918,41 @@ NotifyClamd clamd.conf
     #[traced_test]
     async fn multi_virus() -> eyre::Result<()> {
         setup_clamav();
-        let file_bytes = String::from("exec('aW1wb3J0IHNvY2tldCxvcwpzbz1zb2NrZXQuc29ja2V0KHNvY2tldC5BRl')\n\nimport base64,sys;exec(base64.b64decode({2:str,3:lambda b:bytes()}))");
+        let current_dir = std::env::current_dir()?;
+        let file_path = current_dir.join("multi.py");
+        let file_content = String::from("exec('aW1wb3J0IHNvY2tldCxvcwpzbz1zb2NrZXQuc29ja2V0KHNvY2tldC5BRl')\n\nimport base64,sys;exec(base64.b64decode({2:str,3:lambda b:bytes()}))");
+        let mut file = File::create(&file_path).await?;
+        file.write_all(file_content.as_bytes()).await?;
         let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
-        let res = clamd_client.scan_bytes(file_bytes.as_bytes()).await?;
+        let res = clamd_client.all_match_scan(&file_path).await?;
         match res {
             ScanResult::Benign => panic!("Malignent scan result expected"),
             ScanResult::Malignent { infection_types } => assert_eq!(
                 infection_types,
-                vec!["Legacy.Trojan.Agent-37027".to_owned()]
+                vec![
+                    "Legacy.Trojan.Agent-37027".to_owned(),
+                    "Legacy.Trojan.Agent-37025".to_owned(),
+                    "Legacy.Trojan.Agent-37025".to_owned(),
+                ]
             ),
         }
+        tokio::fs::remove_file(file_path).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn benign_file_scan() -> eyre::Result<()> {
+        setup_clamav();
+        let current_dir = std::env::current_dir()?;
+        let file_path = current_dir.join("safe.py");
+        let file_content = String::from("import somemodule; print(f'{somemodule.somemethod()')");
+        let mut file = File::create(&file_path).await?;
+        file.write_all(file_content.as_bytes()).await?;
+        let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
+        let res = clamd_client.all_match_scan(&file_path).await?;
+        assert!(matches!(res, ScanResult::Benign));
+        tokio::fs::remove_file(file_path).await?;
         Ok(())
     }
 }
