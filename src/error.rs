@@ -3,8 +3,6 @@
 use crate::ClamdClient;
 use std::num::TryFromIntError;
 
-use tracing::trace;
-
 pub type Result<T> = std::result::Result<T, ClamdError>;
 
 /// Errors that can occur when using [`ClamdClient`].
@@ -32,6 +30,9 @@ pub enum ClamdError {
         #[source]
         std::io::Error,
     ),
+    /// Occurs when the file path is not utf8.
+    #[error("invalid path")]
+    InvalidPath,
     /// Occurs when the response from clamd is not what the library
     /// expects. Contains the invalid response.
     #[error("invalid response from clamd: {0}")]
@@ -44,49 +45,6 @@ pub enum ClamdError {
     /// is somehow malformed. Contains the invalid response.
     #[error("incomplete response from clamd: {0}")]
     IncompleteResponse(String),
-    /// Occurs when everything between this library and clamd went
-    /// well but clamd seems to have found a virus signature. See also
-    /// [`ClamdError::scan_error`].
-    #[error("clamd returned error on scan, possible virus: {0}")]
-    ScanError(String),
-}
-
-impl ClamdError {
-    /// If you want to ignore any error but an actual malignent scan
-    /// result from clamd. I do not recommend using this without careful thought, as any other error
-    /// could hide that uploaded bytes are actually a virus.
-    /// # Example
-    /// ```rust
-    /// # use std::net::SocketAddr;
-    /// # use clamd_client::{ClamdClientBuilder, ScanResult};
-    /// # use eyre::Result;
-    /// # async fn doc() -> eyre::Result<()> {
-    /// let address = "127.0.0.1:3310".parse::<SocketAddr>()?;
-    /// let mut clamd_client = ClamdClientBuilder::tcp_socket(address)?.build();
-    ///
-    /// // This downloads a virus signature that is benign but trips clamd.
-    /// let eicar_bytes = reqwest::get("https://secure.eicar.org/eicarcom2.zip")
-    ///   .await?
-    ///   .bytes()
-    ///   .await?;
-    ///
-    /// let result = clamd_client.scan_bytes(&eicar_bytes).await?;
-    /// match result {
-    ///     ScanResult::Malignent { infection_types } => {
-    ///         tracing::info!("clamd found a virus(es):\n{}", infection_types.join("\n"))
-    ///     }
-    ///     _ => (),
-    /// };
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn scan_error(self) -> Option<String> {
-        match self {
-            Self::ScanError(s) => Some(s),
-            _ => {
-                trace!("ignoring non-scan error {:?}", self);
-                None
-            }
-        }
-    }
+    #[error("unsupported feature: path must point to file")]
+    UnsupportedFeature,
 }

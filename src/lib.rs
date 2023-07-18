@@ -48,16 +48,14 @@ enum ClamdRequestMessage {
     EndStream,
     StartSession,
     EndSession,
-    // ContScan(PathBuf),
+    AllMatchScan(PathBuf),
 }
 
-struct ClamdZeroDelimitedCodec {
-    next_index: usize,
-}
+struct ClamdZeroDelimitedCodec;
 
 impl ClamdZeroDelimitedCodec {
     fn new() -> Self {
-        Self { next_index: 0 }
+        Self
     }
 }
 
@@ -125,15 +123,15 @@ impl Encoder<ClamdRequestMessage> for ClamdZeroDelimitedCodec {
                 dst.put(&b"zEND"[..]);
                 dst.put_u8(0);
                 Ok(())
-            } // ClamdRequestMessage::AllMatch(path) => {
-              //     // TODO: safety
-              //     let path = path.to_str().unwrap();
-              //     dst.reserve(10 + path.len());
-              //     dst.put(&b"zALLMATCH "[..]);
-              //     dst.put(path.as_bytes());
-              //     dst.put_u8(0);
-              //     Ok(())
-              // }
+            }
+            ClamdRequestMessage::AllMatchScan(path) => {
+                let path = path.to_str().ok_or(ClamdError::InvalidPath)?;
+                dst.reserve(14 + path.len());
+                dst.put(&b"zALLMATCHSCAN "[..]);
+                dst.put(path.as_bytes());
+                dst.put_u8(0);
+                Ok(())
+            }
         }
     }
 }
@@ -144,15 +142,12 @@ impl Decoder for ClamdZeroDelimitedCodec {
     type Error = ClamdError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
-        if let Some(rel_split_pos) = src[self.next_index..].iter().position(|&x| x == 0u8) {
-            let split_pos = rel_split_pos + self.next_index;
-            let chunk = src.split_to(split_pos).freeze();
+        if let Some(frame_end) = src.iter().position(|&x| x == 0u8) {
+            let chunk = src.split_to(frame_end).freeze();
             src.advance(1);
-            self.next_index = 0;
             let s = String::from_utf8(chunk.into()).map_err(ClamdError::DecodingUtf8Error)?;
             Ok(Some(s))
         } else {
-            self.next_index = src.len();
             Ok(None)
         }
     }
@@ -319,24 +314,27 @@ pub enum ScanResult {
 
 impl ScanResult {
     pub(crate) fn from_output(out: &str) -> Result<Self> {
-        if out.ends_with("OK") {
+        let mut infection_types: Vec<String> = Vec::new();
+        let results = out.split_terminator('\0');
+        for raw_result in results {
+            let result = raw_result
+                .split_at(
+                    raw_result
+                        .rfind(':')
+                        .ok_or_else(|| ClamdError::IncompleteResponse(out.to_string()))?
+                        + 1,
+                )
+                .1
+                .trim();
+            if result.ends_with("OK") {
+                continue;
+            } else {
+                infection_types.push(result.replace(" FOUND", ""));
+            }
+        }
+        if infection_types.is_empty() {
             Ok(ScanResult::Benign)
         } else {
-            let mut infection_types: Vec<String> = Vec::new();
-            let results = out.split_terminator('\0');
-            for result in results {
-                let virus = result
-                    .split_at(
-                        result
-                            .rfind(':')
-                            .ok_or_else(|| ClamdError::IncompleteResponse(out.to_string()))?
-                            + 1,
-                    )
-                    .1
-                    .trim()
-                    .replace(" FOUND", "");
-                infection_types.push(virus);
-            }
             Ok(ScanResult::Malignent { infection_types })
         }
     }
@@ -437,7 +435,7 @@ impl ClamdClient {
         sock.send(ClamdRequestMessage::Ping).await?;
         trace!("Sent ping to clamd");
         if let Some(s) = sock.next().await.transpose()? {
-            if s.ends_with("PONG") {
+            if s.contains("PONG") {
                 trace!("Received pong from clamd");
                 Ok(())
             } else {
@@ -455,7 +453,7 @@ impl ClamdClient {
         trace!("Sent version request to clamd");
 
         if let Some(s) = sock.next().await.transpose()? {
-            trace!("Received version from clamd");
+            trace!("Received version from clamd: {}", s.trim());
             Ok(s)
         } else {
             Err(ClamdError::NoResponse)
@@ -468,7 +466,7 @@ impl ClamdClient {
         sock.send(ClamdRequestMessage::Reload).await?;
         trace!("Sent reload request to clamd");
         if let Some(s) = sock.next().await.transpose()? {
-            if s == "RELOADING" {
+            if s.contains("RELOADING") {
                 trace!("Clamd started reload");
                 // make sure old tcp connection is closed
                 // connection will be re-created on next command
@@ -490,7 +488,7 @@ impl ClamdClient {
         trace!("Sent stats request to clamd");
 
         if let Some(s) = sock.next().await.transpose()? {
-            if s.ends_with("END") {
+            if s.contains("END") {
                 trace!("Got stats from clamd");
                 Ok(s)
             } else {
@@ -565,6 +563,21 @@ impl ClamdClient {
         sock.send(ClamdRequestMessage::EndSession).await?;
         Ok(())
     }
+
+    pub async fn all_match_scan(&mut self, path_to_scan: &impl AsRef<Path>) -> Result<ScanResult> {
+        let path = path_to_scan.as_ref().to_path_buf();
+        if path.is_dir() {
+            return Err(ClamdError::UnsupportedFeature);
+        }
+        let mut sock = self.connect().await?;
+        sock.send(ClamdRequestMessage::AllMatchScan(path)).await?;
+        let mut res = String::new();
+        while let Some(s) = sock.next().await.transpose()? {
+            res += &s;
+            res += "\0";
+        }
+        ScanResult::from_output(&res)
+    }
 }
 
 #[cfg(test)]
@@ -573,6 +586,7 @@ mod tests {
     use super::*;
     use std::process::Command;
     use std::sync::Once;
+    use tokio::io::AsyncWriteExt;
     use tracing_test::traced_test;
 
     const CLAMAV_VERSION: &str = "1.0.0";
@@ -655,6 +669,8 @@ NotifyClamd clamd.conf
 
     #[cfg(target_os = "linux")]
     fn setup_clamav() {
+        use std::process::Stdio;
+
         INIT.call_once(|| {
             generate_config_files();
             let whoami = Command::new("whoami").output().unwrap();
@@ -685,7 +701,11 @@ NotifyClamd clamd.conf
                         .unwrap();
                 }
             };
-            Command::new("clamd").arg("-c").arg("clamd.conf").status().unwrap();
+            let ping = Command::new("printf").arg("zPING\\0").stdout(Stdio::piped()).spawn().unwrap();
+            let pong = Command::new("nc").arg("-U").arg("clamd.sock").stdin(ping.stdout.unwrap()).output().unwrap();
+            if String::from_utf8(pong.stdout).unwrap() != "PONG\0" {
+                Command::new("clamd").arg("-c").arg("clamd.conf").status().unwrap();
+            }
         })
     }
 
@@ -774,7 +794,8 @@ NotifyClamd clamd.conf
         let random_bytes: Vec<u8> = (0..NUM_BYTES).map(|_| rand::random::<u8>()).collect();
         let mut clamd_client = ClamdClientBuilder::unix_socket(UNIX_SOCKET_PATH).build();
 
-        clamd_client.scan_bytes(&random_bytes).await?;
+        let result = clamd_client.scan_bytes(&random_bytes).await?;
+        assert!(matches!(result, ScanResult::Benign));
         Ok(())
     }
 
@@ -841,16 +862,41 @@ NotifyClamd clamd.conf
     #[traced_test]
     async fn multi_virus() -> eyre::Result<()> {
         setup_clamav();
-        let file_bytes = String::from("exec('aW1wb3J0IHNvY2tldCxvcwpzbz1zb2NrZXQuc29ja2V0KHNvY2tldC5BRl')\n\nimport base64,sys;exec(base64.b64decode({2:str,3:lambda b:bytes()}))");
+        let current_dir = std::env::current_dir()?;
+        let file_path = current_dir.join("multi.py");
+        let file_content = String::from("exec('aW1wb3J0IHNvY2tldCxvcwpzbz1zb2NrZXQuc29ja2V0KHNvY2tldC5BRl')\n\nimport base64,sys;exec(base64.b64decode({2:str,3:lambda b:bytes()}))");
+        let mut file = File::create(&file_path).await?;
+        file.write_all(file_content.as_bytes()).await?;
         let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
-        let res = clamd_client.scan_bytes(file_bytes.as_bytes()).await?;
+        let res = clamd_client.all_match_scan(&file_path).await?;
         match res {
             ScanResult::Benign => panic!("Malignent scan result expected"),
             ScanResult::Malignent { infection_types } => assert_eq!(
                 infection_types,
-                vec!["Legacy.Trojan.Agent-37027".to_owned()]
+                vec![
+                    "Legacy.Trojan.Agent-37027".to_owned(),
+                    "Legacy.Trojan.Agent-37025".to_owned(),
+                    "Legacy.Trojan.Agent-37025".to_owned(),
+                ]
             ),
         }
+        tokio::fs::remove_file(file_path).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn benign_file_scan() -> eyre::Result<()> {
+        setup_clamav();
+        let current_dir = std::env::current_dir()?;
+        let file_path = current_dir.join("safe.py");
+        let file_content = String::from("import somemodule; print(f'{somemodule.somemethod()')");
+        let mut file = File::create(&file_path).await?;
+        file.write_all(file_content.as_bytes()).await?;
+        let mut clamd_client = ClamdClientBuilder::tcp_socket(TCP_ADDRESS)?.build();
+        let res = clamd_client.all_match_scan(&file_path).await?;
+        assert!(matches!(res, ScanResult::Benign));
+        tokio::fs::remove_file(file_path).await?;
         Ok(())
     }
 }
